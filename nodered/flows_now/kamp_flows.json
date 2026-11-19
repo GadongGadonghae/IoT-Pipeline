@@ -1,0 +1,240 @@
+[
+    {
+        "id": "d82ac6542ef3a151",
+        "type": "tab",
+        "label": "SFaaS 수집 (정제 → DB)",
+        "disabled": false,
+        "info": "설비 → MQTT → Node-RED(정제만) → PostgreSQL. 판정은 백엔드가 해요. v0.3.8: productId 저장, 프레스는 제품 1줄에 값 채우기(UPSERT)."
+    },
+    {
+        "id": "78fd31236fa08ee0",
+        "type": "comment",
+        "z": "d82ac6542ef3a151",
+        "name": "① 위: 측정값·검사·코일 (sfaas/raw/#)   ② 아래: 상태 신호 (sfaas/hb/#)",
+        "info": "",
+        "x": 330,
+        "y": 40,
+        "wires": []
+    },
+    {
+        "id": "8778e7f95bdd4f76",
+        "type": "mqtt in",
+        "z": "d82ac6542ef3a151",
+        "name": "sfaas/raw/#",
+        "topic": "sfaas/raw/#",
+        "qos": "1",
+        "datatype": "json",
+        "broker": "sfaas_broker",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 130,
+        "y": 100,
+        "wires": [
+            [
+                "ecad009da2828139"
+            ]
+        ]
+    },
+    {
+        "id": "ecad009da2828139",
+        "type": "function",
+        "z": "d82ac6542ef3a151",
+        "name": "정제 + SQL 만들기",
+        "func": "// ===== sfaas/raw/# 정제 → DB 저장용 SQL 만들기 (v0.3.9 확정판 전체, 11/18) =====\n// 적용: Node-RED \"SFaaS 수집\" 탭 → [정제 + SQL 만들기] 더블클릭 → On Message 내용을 메모장에 백업\n//       → 전부 지우고 이 파일 내용을 통째로 붙여 넣기 → Done → Deploy\n//\n// 출력 1: DB 저장 (msg.query + msg.params)   출력 2: 버린 메시지 (이유 포함)\n// 판정(OK/NG, 상태, 알람)은 하지 않아요. 측정값 result는 비워서 저장 → 백엔드가 채움\n// v0.3.8: 측정값마다 productId → product_id. 프레스는 제품 1개 = 1줄 (PR1이면 새 줄, PR2~PR4는 같은 줄에 그 값만)\n// v0.3.9: 메시지 event — \"start\" = 설비에 들어감 (값 없음), \"end\" = 값을 쓰고 내보냄 (없으면 end)\n//   start → product_flow에만 줄 생성 (started_at). 공정 테이블은 건드리지 않아요\n//   end   → 공정 테이블에 값 쓰기 + 같은 SQL 문장으로 product_flow.ended_at (같은 시각 값)\n//   공정 테이블에는 started_at·ended_at 칸이 없어요 (들어간·나간 시각은 product_flow에만)\n//   measured_at = 처리 끝난 시각 고정 (프레스는 PR1 끝난 시각, PR2~PR4는 덮어쓰지 않음)\n\nconst id = msg.topic.split('/').pop();          // 정제 1: 토픽에서 설비 ID\nconst p = msg.payload;\nconst drop = (why) => [null, { topic: msg.topic, payload: p, reason: why }];\n\nif (!p || typeof p !== 'object') return drop('JSON 아님');\n\n// 정제 1: 시각 → 한국 시간 'YYYY-MM-DD HH:mm:ss.SSS' (DB는 시간대 없는 TIMESTAMP)\nconst t = new Date(p.ts);\nif (isNaN(t)) return drop('ts 형식 오류');\nconst ts = new Date(t.getTime() + 9 * 3600 * 1000).toISOString().replace('T', ' ').slice(0, 23);\n\n// 정제 6: QoS 1 재전송 중복 제거 (최근 3000건 기억)\nconst key = msg.topic + '|' + p.ts + '|' + (p.productId || p.materialId || '') + '|' + (p.event || 'end');\nlet seen = context.get('seen') || [];\nif (seen.includes(key)) return drop('중복');\nseen.push(key);\nif (seen.length > 3000) seen = seen.slice(-3000);\ncontext.set('seen', seen);\n\n// ---- 코일 입고 ----\nif (id === 'COIL') {\n    const qty = Number(p.productQty ?? 20);\n    if (!p.materialId || !Number.isInteger(qty) || qty <= 0) return drop('코일 필수값 오류');\n    return [{\n        query: 'INSERT INTO coil_receipt (material_id, received_at, product_qty) VALUES ($1, $2, $3)',\n        params: [p.materialId, ts, qty], topic: msg.topic\n    }, null];\n}\n\n// ---- v0.3.9 도우미 ----\n// 공정 테이블 SQL과 같은 문장으로 product_flow에 나간 시각(ended_at)을 써요\nfunction withFlowEnd(o, pid, eq, line, when) {\n    if (!pid || !line) return o;\n    const n = o.params.length;\n    o.query = `WITH m AS (${o.query}) INSERT INTO product_flow (product_id, equipment_id, line_id, ended_at) ` +\n        `VALUES ($${n + 1}, $${n + 2}, $${n + 3}, $${n + 4}) ` +\n        `ON CONFLICT (product_id, equipment_id) DO UPDATE SET ended_at = EXCLUDED.ended_at`;\n    o.params = o.params.concat([pid, eq, line, when]);\n    return o;\n}\n// 들어갈 때는 product_flow에만 줄을 만들어요 (공정 테이블엔 아무것도 안 씀)\nfunction flowStart(pid, eq, line, when) {\n    return {\n        query: 'INSERT INTO product_flow (product_id, equipment_id, line_id, started_at) VALUES ($1, $2, $3, $4) ' +\n            'ON CONFLICT (product_id, equipment_id) DO UPDATE SET started_at = EXCLUDED.started_at',\n        params: [pid, eq, line, when], topic: msg.topic\n    };\n}\n// 제품이 온 라인 = 제품 ID 앞자리 (A-20261118-0001 → A)\nfunction lineOf(pid) {\n    return (typeof pid === 'string' && /^[A-F]-/.test(pid)) ? pid[0] : null;\n}\n\n// ---- 비전 검사 (visionPass → OK/NG 형식 변환, 판정은 검사기가 이미 함) ----\nif (id === 'VI') {\n    if (!p.productId || !p.lineId) return drop('검사 필수값 오류');\n    const vline = lineOf(p.productId) || p.lineId;\n    if (p.event === 'start') return [flowStart(p.productId, 'VI', vline, ts), null];\n    if (typeof p.visionPass !== 'boolean') return drop('검사 필수값 오류');\n    return [withFlowEnd({\n        query: 'INSERT INTO inspection_result (equipment_id, product_id, line_id, paint_equipment_id, result, inspected_at) ' +\n            'VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (product_id) DO NOTHING',\n        params: ['VI', p.productId, p.lineId, p.paintId || null, p.visionPass ? 'OK' : 'NG', ts], topic: msg.topic\n    },\n        p.productId, 'VI', vline, ts), null];\n}\n\n// ---- 측정값 (슬리팅·프레스·용접·도장) ----\n// 정제 2: camelCase → DB 컬럼명 (모르는 항목은 무시)\nconst MAP = {\n    slitting_data: { torque: 'torque', current: 'current', voltage: 'voltage' },\n    press_data: { pressureLeft: 'pressure_left', pressureRight: 'pressure_right', pressureDiff: 'pressure_diff', pressTime: 'press_time', pressureTotal: 'pressure_total' },\n    welding_data: { pressForce: 'press_force', current: 'current', voltage: 'voltage', weldTime: 'weld_time' },\n    painting_data: { ph: 'ph', temperature: 'temperature', current: 'current', voltage: 'voltage' },\n};\nlet table = null;\nif (/^[A-F]-SL$/.test(id)) table = 'slitting_data';\nelse if (/^[A-F]-PR[1-4]$/.test(id)) table = 'press_data';\nelse if (/^[A-F]-WD$/.test(id)) table = 'welding_data';\nelse if (/^PT[12]$/.test(id)) table = 'painting_data';\nif (!table) return drop('모르는 설비 ID: ' + id);\n\nconst pid = (typeof p.productId === 'string' && p.productId.trim()) ? p.productId.trim() : null;\nif (table === 'press_data' && !pid) return drop('프레스 productId 없음');   // 프레스는 제품 번호로 줄을 찾아요\n\n// v0.3.9: 투입(start) — product_flow에만 들어간 시각을 써요. 공정 테이블 행은 처리가 끝날 때 만들어요\nconst flowLine = lineOf(pid) || (/^[A-F]-/.test(id) ? id[0] : (p.lineId || null));\nif (p.event === 'start') {\n    if (!pid || !flowLine) return drop('투입 productId·라인 없음');\n    return [flowStart(pid, id, flowLine, ts), null];\n}\n\n// ---- 완료(end): 공정 테이블에 값 쓰기 ----\nconst values = p.values || {};\nconst cols = ['product_id', 'equipment_id', 'measured_at'];\nconst params = [pid, id, ts];\nfor (const [k, v] of Object.entries(values)) {\n    const col = MAP[table][k];\n    if (!col) continue;\n    const n = Number(v);                        // 정제 1: \"275.1\" → 275.1\n    if (v === null || v === '' || !Number.isFinite(n)) return drop('숫자 아님: ' + k);   // 정제 4\n    // 정제 3: 단위 맞추기 — 슬리팅 PLC 레지스터 값 변환은 PLC 확정 후 여기에 추가\n    cols.push(col);\n    params.push(n);\n}\n// 정제 5: 센서 오류만 버림 (관리값 이탈은 버리지 않음! 백엔드가 판정·알람)\n// (압력 차 pressure_diff는 음수가 정상일 수 있어서 제외)\nif (table === 'press_data' && cols.some((c, i) => ['pressure_left', 'pressure_right', 'pressure_total'].includes(c) && params[i] < 0)) return drop('센서 오류: 음수 압력');\n\n// ★ 임시 (11/17): 슬리팅 A~F는 재생이 시각·제품 번호만 보내요 → 실제 인버터(A-SL) 16초 평균을 6대 모두에 채워요\nif (table === 'slitting_data') {\n    const src = global.get('aslAvg') || global.get('aslLatest') || { current: 0, voltage: 0 };\n    if (!cols.includes('current')) { cols.push('current'); params.push(Number(src.current) || 0); }\n    if (!cols.includes('voltage')) { cols.push('voltage'); params.push(Number(src.voltage) || 0); }\n}\n\n// 정제 6: 공용 도장은 lineId 필수\nif (table === 'painting_data') {\n    if (!/^[A-F]$/.test(p.lineId || '')) return drop('도장 lineId 없음');\n    cols.push('line_id');\n    params.push(p.lineId);\n}\n// ※ 가상 슬리팅은 values가 비어 있어도 저장해요 (생산 1개 기록 → 재공 계산에 필요)\n\nconst ph = params.map((_, i) => '$' + (i + 1)).join(', ');\nlet query = `INSERT INTO ${table} (${cols.join(', ')}) VALUES (${ph})`;\nif (table === 'press_data') {\n    // 같은 제품 줄에 이번 프레스 값만 채워요. measured_at(PR1 끝난 시각)은 덮어쓰지 않아요 (v0.3.9)\n    // equipment_id는 더 뒤의 단으로만 바꿔요 (순서가 바뀌어 와도 안전). 값이 붙을 때마다 result를 비워요 (NG면 그대로)\n    const valCols = cols.slice(3);\n    const sets = valCols.map(c => `${c} = EXCLUDED.${c}`).concat([\n        'equipment_id = CASE WHEN right(EXCLUDED.equipment_id, 1) > right(press_data.equipment_id, 1) THEN EXCLUDED.equipment_id ELSE press_data.equipment_id END',\n        \"result = CASE WHEN press_data.result = 'NG' THEN 'NG' ELSE NULL END\",\n    ]);\n    query += ` ON CONFLICT (product_id) DO UPDATE SET ${sets.join(', ')}`;\n} else if (pid) {\n    query += ' ON CONFLICT (product_id) DO NOTHING';   // 같은 제품이 두 번 오면 1줄만\n}\n// v0.3.9: 같은 문장으로 product_flow 나간 시각 (공정 테이블과 같은 ts)\nreturn [withFlowEnd({ query, params, topic: msg.topic }, pid, id, flowLine, ts), null];\n",
+        "outputs": 2,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 350,
+        "y": 100,
+        "wires": [
+            [
+                "a7d55a5d90521f29"
+            ],
+            [
+                "4027ef761a524c10"
+            ]
+        ],
+        "outputLabels": [
+            "DB 저장",
+            "버린 메시지"
+        ]
+    },
+    {
+        "id": "a7d55a5d90521f29",
+        "type": "postgresql",
+        "z": "d82ac6542ef3a151",
+        "name": "DB 저장 (측정값·검사·코일)",
+        "query": "",
+        "postgreSQLConfig": "sfaas_pg",
+        "split": false,
+        "rowsPerMsg": 1,
+        "outputs": 1,
+        "x": 640,
+        "y": 80,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "4027ef761a524c10",
+        "type": "debug",
+        "z": "d82ac6542ef3a151",
+        "name": "버린 메시지",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": true,
+        "complete": "reason",
+        "targetType": "msg",
+        "statusVal": "reason",
+        "statusType": "msg",
+        "x": 610,
+        "y": 140,
+        "wires": []
+    },
+    {
+        "id": "dd18b196cdea388f",
+        "type": "mqtt in",
+        "z": "d82ac6542ef3a151",
+        "name": "sfaas/hb/#",
+        "topic": "sfaas/hb/#",
+        "qos": "0",
+        "datatype": "json",
+        "broker": "sfaas_broker",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 130,
+        "y": 220,
+        "wires": [
+            [
+                "e25c5a09f57fb959"
+            ]
+        ]
+    },
+    {
+        "id": "e25c5a09f57fb959",
+        "type": "function",
+        "z": "d82ac6542ef3a151",
+        "name": "상태 신호 → 덮어쓰기 SQL",
+        "func": "// ===== sfaas/hb/# 상태 신호 → equipment_signal 덮어쓰기 (설비당 1줄) =====\nconst id = msg.topic.split('/').pop();\nconst p = msg.payload;\nif (!p || typeof p !== 'object') return null;\nconst t = new Date(p.ts);\nif (isNaN(t)) return null;\nconst ts = new Date(t.getTime() + 9 * 3600 * 1000).toISOString().replace('T', ' ').slice(0, 23);\nconst fault = (p.fault === true || p.fault === 1 || p.fault === '1' || p.fault === 'true') ? 1 : 0;\nreturn {\n    query: 'INSERT INTO equipment_signal (equipment_id, last_seen_at, fault, updated_at) VALUES ($1, $2, $3, now()) ' +\n           'ON CONFLICT (equipment_id) DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at, fault = EXCLUDED.fault, updated_at = now() ' +\n           'WHERE equipment_signal.last_seen_at <= EXCLUDED.last_seen_at',   // 늦게 도착한 옛 신호로 덮어쓰지 않게\n    params: [id, ts, fault],\n};\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 370,
+        "y": 220,
+        "wires": [
+            [
+                "5435afc97c47368f"
+            ]
+        ]
+    },
+    {
+        "id": "5435afc97c47368f",
+        "type": "postgresql",
+        "z": "d82ac6542ef3a151",
+        "name": "DB 저장 (equipment_signal)",
+        "query": "",
+        "postgreSQLConfig": "sfaas_pg",
+        "split": false,
+        "rowsPerMsg": 1,
+        "outputs": 1,
+        "x": 640,
+        "y": 220,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "c39743ccd16fd2ee",
+        "type": "catch",
+        "z": "d82ac6542ef3a151",
+        "name": "DB 저장 오류",
+        "scope": [
+            "a7d55a5d90521f29",
+            "5435afc97c47368f"
+        ],
+        "uncaught": false,
+        "x": 130,
+        "y": 300,
+        "wires": [
+            [
+                "fb4455b4bf12d89c"
+            ]
+        ]
+    },
+    {
+        "id": "fb4455b4bf12d89c",
+        "type": "debug",
+        "z": "d82ac6542ef3a151",
+        "name": "DB 오류 내용",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "true",
+        "targetType": "full",
+        "x": 360,
+        "y": 300,
+        "wires": []
+    },
+    {
+        "id": "sfaas_broker",
+        "type": "mqtt-broker",
+        "name": "Mosquitto (localhost)",
+        "broker": "localhost",
+        "port": "1883",
+        "clientid": "sfaas-nodered",
+        "autoConnect": true,
+        "usetls": false,
+        "protocolVersion": "4",
+        "keepalive": "60",
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "closeTopic": "",
+        "willTopic": ""
+    },
+    {
+        "id": "sfaas_pg",
+        "type": "postgreSQLConfig",
+        "name": "sfaas DB (sfaas_nr)",
+        "host": "127.0.0.1",
+        "hostFieldType": "str",
+        "port": 5432,
+        "portFieldType": "num",
+        "database": "sfaas",
+        "databaseFieldType": "str",
+        "ssl": "false",
+        "sslFieldType": "bool",
+        "applicationName": "sfaas-nodered",
+        "applicationNameType": "str",
+        "max": 10,
+        "maxFieldType": "num",
+        "idle": 1000,
+        "idleFieldType": "num",
+        "connectionTimeout": 10000,
+        "connectionTimeoutFieldType": "num",
+        "userFieldType": "cred",
+        "userEnv": "",
+        "passwordFieldType": "cred",
+        "passwordEnv": ""
+    },
+    {
+        "id": "ce5000e7952b9d3e",
+        "type": "global-config",
+        "env": [],
+        "modules": {
+            "node-red-contrib-postgresql": "0.16.2"
+        }
+    }
+]

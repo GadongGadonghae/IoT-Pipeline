@@ -1,0 +1,19 @@
+# 백업·임시
+old/
+**/old/
+__pycache__/
+*.pyc
+*.zip
+player/query
+
+# 개인·PC 설정
+*.local.json
+.env
+.env.*
+
+# 편집기
+.vscode/
+.idea/
+
+# 옛 버전 테스트 데이터 (v0.3.7, 지금 DB와 안 맞음)
+test_data.sql

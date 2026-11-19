@@ -1,0 +1,1019 @@
+[
+    {
+        "id": "887d9079ebe7f11b",
+        "type": "tab",
+        "label": "A-SL 슬리팅: 인버터 → MQTT · PLC (실제 설비)",
+        "disabled": false,
+        "info": "인버터(192.168.0.100:502)를 1초마다 1번만 읽어서 두 곳에 나눠 씀.\n① 우리(SFaaS): 16개 평균 = 제품 1개 → sfaas/raw/A-SL, 상태 신호 1초 → sfaas/hb/A-SL\n② PLC 담당: 실제 단위 표시 + PLC D309~D313 쓰기·읽기 (교육장 공용 PLC → 확인 전까지 꺼 둠)\n③ 인버터 수동 명령 버튼 (공용 설비 → PLC 담당 확인 후 사용)\n재생 프로그램 config.json에서 A-SL을 꺼야 중복이 안 생겨요. 예전 'A-SL 슬리팅 (실제 인버터)' 탭은 지워야 해요.\nv0.3.8: A-SL 메시지에 productId(A-날짜-순번)를 붙여요. 재생 시작할 때 [제품 번호 초기화]를 누르면 재생 데이터의 A라인 번호와 순서가 맞아요."
+    },
+    {
+        "id": "b170ee3c948cee1d",
+        "type": "comment",
+        "z": "887d9079ebe7f11b",
+        "name": "① 인버터 읽기 1초 (1번만) → 우리 MQTT + PLC 담당 표시",
+        "info": "",
+        "x": 260,
+        "y": 40,
+        "wires": []
+    },
+    {
+        "id": "b8974f9c4ece4a59",
+        "type": "comment",
+        "z": "887d9079ebe7f11b",
+        "name": "② PLC 쓰기·읽기: 꺼 둠 (D309~D313 사용 가능 여부를 PLC 담당이 확인한 뒤 켜기)",
+        "info": "",
+        "x": 330,
+        "y": 380,
+        "wires": []
+    },
+    {
+        "id": "c0f24b2834799c3f",
+        "type": "comment",
+        "z": "887d9079ebe7f11b",
+        "name": "③ 인버터 수동 명령 ⚠️ 공용 설비 — PLC 담당 확인 후 사용 (값의 뜻은 추정)",
+        "info": "",
+        "x": 1700,
+        "y": 80,
+        "wires": []
+    },
+    {
+        "id": "595a2b3dd00498ae",
+        "type": "comment",
+        "z": "887d9079ebe7f11b",
+        "name": "오류: 이 탭 전체 통신 오류를 모아 보여 줘요",
+        "info": "",
+        "x": 250,
+        "y": 720,
+        "wires": []
+    },
+    {
+        "id": "ff2648fdd553dfc6",
+        "type": "modbus-read",
+        "z": "887d9079ebe7f11b",
+        "name": "인버터 전류/주파수/전압/DC (1초)",
+        "topic": "",
+        "showStatusActivities": false,
+        "logIOActivities": false,
+        "showErrors": true,
+        "showWarnings": true,
+        "unitid": "1",
+        "dataType": "HoldingRegister",
+        "adr": "8",
+        "quantity": "4",
+        "rate": "1",
+        "rateUnit": "s",
+        "delayOnStart": false,
+        "enableDeformedMessages": false,
+        "startDelayTime": "",
+        "server": "f1a2b3c4d5e6f702",
+        "useIOFile": false,
+        "ioFile": "",
+        "useIOForPayload": false,
+        "emptyMsgOnFail": false,
+        "x": 200,
+        "y": 100,
+        "wires": [
+            [
+                "210ac071d45508dc",
+                "d749a6c743de409e",
+                "56ef2ad5efef0089"
+            ],
+            []
+        ]
+    },
+    {
+        "id": "89da9d78618689d6",
+        "type": "modbus-read",
+        "z": "887d9079ebe7f11b",
+        "name": "인버터 RPM (1초)",
+        "topic": "",
+        "showStatusActivities": false,
+        "logIOActivities": false,
+        "showErrors": true,
+        "showWarnings": true,
+        "unitid": "1",
+        "dataType": "HoldingRegister",
+        "adr": "20",
+        "quantity": "1",
+        "rate": "1",
+        "rateUnit": "s",
+        "delayOnStart": false,
+        "enableDeformedMessages": false,
+        "startDelayTime": "",
+        "server": "f1a2b3c4d5e6f702",
+        "useIOFile": false,
+        "ioFile": "",
+        "useIOForPayload": false,
+        "emptyMsgOnFail": false,
+        "x": 170,
+        "y": 300,
+        "wires": [
+            [
+                "fde53822b88bf426",
+                "e269b1874c77499e"
+            ],
+            []
+        ]
+    },
+    {
+        "id": "210ac071d45508dc",
+        "type": "function",
+        "z": "887d9079ebe7f11b",
+        "name": "Function 1 | 5개 데이터만 변환",
+        "func": "\nconst data = Array.isArray(msg.payload)\n    ? msg.payload\n    : msg.payload?.data;\n\nif (!Array.isArray(data) || data.length < 4) {\n    node.warn(\"Modbus 4개 데이터 형식 오류\");\n    return null;\n}\n\n// Modbus 데이터\nconst current = Number(data[0]);\nconst frequency = Number(data[1]);\nconst voltage = Number(data[2]);\nconst dcVoltage = Number(data[3]);\n\n// Function 2에서 저장한 RPM 가져오기\nconst saved = global.get(\"inverterRPM\");\n\nconst rpmOK = saved &&\n    Number.isFinite(Number(saved.value)) &&\n    Date.now() - saved.time < 5000;\n\nconst rpm = rpmOK ? Number(saved.value) : null;\n\n// 실제 단위로 변환\nconst display = {\n    outputCurrent: current / 10,\n    outputFrequency: frequency / 100,\n    outputVoltage: voltage / 10,\n    dcLinkVoltage: dcVoltage / 10,\n    outputRpm: rpm\n};\n\n// 출력 1은 항상 Debug로 보냄\nconst displayMsg = { payload: display };\n\n// RPM이 없으면 PLC 전송은 잠시 중단\nif (!rpmOK) {\n    node.status({\n        fill: \"yellow\",\n        shape: \"ring\",\n        text: \"RPM 데이터 대기 중\"\n    });\n    return [displayMsg, null];\n}\n\n// PLC 전송용 원시값 5개\nconst values = [\n    current,\n    frequency,\n    voltage,\n    dcVoltage,\n    rpm\n];\n\nif (values.some(v =>\n    !Number.isInteger(v) || v < 0 || v > 65535\n)) {\n    node.warn(\"PLC 전송값 오류\");\n    return [displayMsg, null];\n}\n\nnode.status({\n    fill: \"green\",\n    shape: \"dot\",\n    text: \"5개 데이터 정상\"\n});\n\nreturn [\n    displayMsg,\n    { payload: values }\n];\n",
+        "outputs": 2,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 520,
+        "y": 180,
+        "wires": [
+            [
+                "c07bf188df935a2c"
+            ],
+            [
+                "dcaf4499611e0f24",
+                "48d80b7aa759c507"
+            ]
+        ]
+    },
+    {
+        "id": "fde53822b88bf426",
+        "type": "function",
+        "z": "887d9079ebe7f11b",
+        "name": "Function 2 | RPM 최신값 저장",
+        "func": "\nconst p = msg.payload;\n\nconst data = Array.isArray(p)\n    ? p\n    : p?.data;\n\nif (!Array.isArray(data) || data.length === 0) {\n    node.warn(\"RPM 데이터 형식 오류: \" + JSON.stringify(p));\n    return null;\n}\n\nconst rpm = Number(data[0]);\n\nif (!Number.isFinite(rpm) || rpm < 0) {\n    node.warn(\"RPM 값 오류: \" + rpm);\n    return null;\n}\n\n// 최신 RPM 저장 (Function 1과 공유)\nglobal.set(\"inverterRPM\", {\n    value: rpm,\n    time: Date.now()\n});\n\n// 노드 아래에 RPM 표시\nnode.status({\n    fill: \"green\",\n    shape: \"dot\",\n    text: \"RPM: \" + rpm\n});\n\n// Debug로 RPM 출력\nmsg.payload = {\n    outputRpm: rpm\n};\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 480,
+        "y": 300,
+        "wires": [
+            [
+                "6569a2a9b4ee5530"
+            ]
+        ]
+    },
+    {
+        "id": "56ef2ad5efef0089",
+        "type": "debug",
+        "z": "887d9079ebe7f11b",
+        "name": "인버터 원시값 (꺼 둠)",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 470,
+        "y": 60,
+        "wires": []
+    },
+    {
+        "id": "c07bf188df935a2c",
+        "type": "debug",
+        "z": "887d9079ebe7f11b",
+        "name": "실시간 5개 데이터 (실제 단위)",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 850,
+        "y": 160,
+        "wires": []
+    },
+    {
+        "id": "dcaf4499611e0f24",
+        "type": "debug",
+        "z": "887d9079ebe7f11b",
+        "name": "PLC 전송 예정 [정수 5개]",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 850,
+        "y": 220,
+        "wires": []
+    },
+    {
+        "id": "6569a2a9b4ee5530",
+        "type": "debug",
+        "z": "887d9079ebe7f11b",
+        "name": "RPM (꺼 둠)",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 720,
+        "y": 300,
+        "wires": []
+    },
+    {
+        "id": "e269b1874c77499e",
+        "type": "debug",
+        "z": "887d9079ebe7f11b",
+        "name": "RPM 원시값 (꺼 둠)",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 420,
+        "y": 340,
+        "wires": []
+    },
+    {
+        "id": "d749a6c743de409e",
+        "type": "function",
+        "z": "887d9079ebe7f11b",
+        "name": "16초 평균 → A-SL 측정값",
+        "func": "// 인버터 값(1초마다) 16개를 모아 평균 → 제품 1개 = 1건 (sfaas/raw/A-SL), 제품 번호를 붙여요\n// 1초마다 읽는 이유: 16초 간격이면 인버터 서버PC가 연결을 끊음\nconst d = Array.isArray(msg.payload) ? msg.payload : msg.payload?.data;\nif (!Array.isArray(d) || d.length < 4) { node.warn('인버터 데이터 형식 오류'); return null; }\n\n// 단위 변환 (PLC 담당 flow와 같은 규칙) — 그래서 우리 Node-RED 정제 3번은 필요 없어요\nconst current = Number(d[0]) / 10;    // A\nconst freq    = Number(d[1]) / 100;   // Hz (확인용, DB에는 안 들어감)\nconst voltage = Number(d[2]) / 10;    // V\nif (![current, freq, voltage].every(Number.isFinite)) { node.warn('숫자 아님'); return null; }\n\nflow.set('lastOk', Date.now());       // 상태 신호용: 마지막으로 잘 읽은 시각\n\nconst N = 16;                         // 슬리팅 처리 시간 16초 = 제품 1개\nconst buf = context.get('buf') || [];\nbuf.push({ current, voltage });\nnode.status({ fill: 'green', shape: 'dot', text: `${current}A · ${voltage}V · ${freq}Hz (${buf.length}/${N})` });\nif (buf.length < N) { context.set('buf', buf); return null; }\ncontext.set('buf', []);\n\nconst avg = (k) => Math.round(buf.reduce((s, x) => s + x[k], 0) / buf.length * 100) / 100;\nglobal.set('aslAvg', { current: avg('current'), voltage: avg('voltage'), at: Date.now() });   // ★ 임시: B~F 복사용 16초 평균\n// 제품 번호 (v0.3.8): 슬리팅 투입 때 생김 → A-YYYYMMDD-0001부터 차례로. 날짜가 바뀌거나 [제품 번호 초기화]를 누르면 0001부터\nconst day = new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10).replace(/-/g, '');\nlet seq = flow.get('pidSeq');\nif (!seq || seq.day !== day) seq = { day, n: 0 };\nseq.n += 1;\nflow.set('pidSeq', seq);\nglobal.set('aslLatest', { current, voltage, at: Date.now() });   // ★ 임시: B~F 슬리팅에 복사할 값\nconst productId = `A-${day}-${String(seq.n).padStart(4, '0')}`;\n\nmsg.topic = 'sfaas/raw/A-SL';\nmsg.payload = {\n    equipmentId: 'A-SL',\n    ts: new Date().toISOString(),\n    source: 'PLC',\n    productId,\n    values: { current: avg('current'), voltage: avg('voltage') }   // torque: 읽을 주소를 찾으면 여기에 추가\n};\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 470,
+        "y": 100,
+        "wires": [
+            [
+                "c9e01e79d9cede34",
+                "189e1c31b44a079e"
+            ]
+        ]
+    },
+    {
+        "id": "c9e01e79d9cede34",
+        "type": "mqtt out",
+        "z": "887d9079ebe7f11b",
+        "d": true,
+        "name": "sfaas/raw/A-SL",
+        "topic": "",
+        "qos": "0",
+        "retain": "false",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "sfaas_broker",
+        "x": 760,
+        "y": 80,
+        "wires": []
+    },
+    {
+        "id": "189e1c31b44a079e",
+        "type": "debug",
+        "z": "887d9079ebe7f11b",
+        "name": "A-SL 보낸 값",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 760,
+        "y": 120,
+        "wires": []
+    },
+    {
+        "id": "8582812e2bac7daa",
+        "type": "inject",
+        "z": "887d9079ebe7f11b",
+        "name": "1초마다",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "1",
+        "crontab": "",
+        "once": true,
+        "onceDelay": "1",
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 140,
+        "y": 250,
+        "wires": [
+            [
+                "7f1249bc886d2984"
+            ]
+        ]
+    },
+    {
+        "id": "7f1249bc886d2984",
+        "type": "function",
+        "z": "887d9079ebe7f11b",
+        "name": "상태 신호 (fault=false)",
+        "func": "// 1초마다 상태 신호. 고장은 안 읽으므로 fault는 항상 false\n// ---------------- [코드 B] \"상태 신호 (fault=false)\" 맨 위에 추가 ----------------\n// player가 재생 중일 때만 보내요 (재생이 끝나면 다른 설비처럼 DC가 되게)\nif (!flow.get('replayRunning')) {\n    node.status({ fill: 'grey', shape: 'ring', text: '재생 안 함 → 신호 멈춤' });\n    return null;\n}\n\n// 20초 넘게 인버터를 못 읽었으면 보내지 않음 → 백엔드에서 DC(통신 끊김)로 보임\nconst last = flow.get('lastOk') || 0;\nif (Date.now() - last > 20000) {\n    node.status({ fill: 'red', shape: 'ring', text: '인버터 응답 없음 → 신호 멈춤' });\n    return null;\n}\nnode.status({ fill: 'green', shape: 'dot', text: '신호 보내는 중' });\nmsg.topic = 'sfaas/hb/A-SL';\nmsg.payload = { equipmentId: 'A-SL', ts: new Date().toISOString(), fault: false };\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 380,
+        "y": 250,
+        "wires": [
+            [
+                "5d86ad7afc481010"
+            ]
+        ]
+    },
+    {
+        "id": "5d86ad7afc481010",
+        "type": "mqtt out",
+        "z": "887d9079ebe7f11b",
+        "name": "sfaas/hb/A-SL",
+        "topic": "",
+        "qos": "0",
+        "retain": "false",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "sfaas_broker",
+        "x": 640,
+        "y": 250,
+        "wires": []
+    },
+    {
+        "id": "48d80b7aa759c507",
+        "type": "Ind MC Write",
+        "z": "887d9079ebe7f11b",
+        "d": true,
+        "name": "PLC 쓰기 D309~D313 (확인 후 사용)",
+        "connection": "67900440c1ac7767",
+        "data": "payload",
+        "address": "D309,5",
+        "addressType": "str",
+        "dataType": "msg",
+        "errorHandling": "throw",
+        "outputs": 1,
+        "x": 860,
+        "y": 440,
+        "wires": [
+            [
+                "5a43c6e1ac74359a"
+            ]
+        ]
+    },
+    {
+        "id": "5a43c6e1ac74359a",
+        "type": "debug",
+        "z": "887d9079ebe7f11b",
+        "name": "PLC 쓰기 결과",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "true",
+        "targetType": "full",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1090,
+        "y": 440,
+        "wires": []
+    },
+    {
+        "id": "3c0d64a5f694b12d",
+        "type": "inject",
+        "z": "887d9079ebe7f11b",
+        "d": true,
+        "name": "PLC 읽기 1초 반복 (확인 후 사용)",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "1",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 210,
+        "y": 600,
+        "wires": [
+            [
+                "ce6a7cb2e2e0de01"
+            ]
+        ]
+    },
+    {
+        "id": "ce6a7cb2e2e0de01",
+        "type": "Ind MC Read",
+        "z": "887d9079ebe7f11b",
+        "d": true,
+        "name": "PLC 읽기 D309~D313 (확인 후 사용)",
+        "connection": "67900440c1ac7767",
+        "address": "D309,5",
+        "addressType": "str",
+        "outputFormat": 1,
+        "errorHandling": "throw",
+        "outputs": 1,
+        "x": 560,
+        "y": 600,
+        "wires": [
+            [
+                "ac7d03a83bdaea8e"
+            ]
+        ]
+    },
+    {
+        "id": "ac7d03a83bdaea8e",
+        "type": "debug",
+        "z": "887d9079ebe7f11b",
+        "name": "PLC 실측 읽기 5개",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 870,
+        "y": 600,
+        "wires": []
+    },
+    {
+        "id": "ba67a28159b3cd81",
+        "type": "inject",
+        "z": "887d9079ebe7f11b",
+        "name": "주파수 지령 2000 (20.00Hz 추정) → 레지스터 4",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 1600,
+        "y": 140,
+        "wires": [
+            [
+                "967eaf4b1b5eda02"
+            ]
+        ]
+    },
+    {
+        "id": "967eaf4b1b5eda02",
+        "type": "function",
+        "z": "887d9079ebe7f11b",
+        "name": "function 4",
+        "func": "msg.payload = [2000];\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1860,
+        "y": 140,
+        "wires": [
+            [
+                "8e3388f0321d1500"
+            ]
+        ]
+    },
+    {
+        "id": "8e3388f0321d1500",
+        "type": "modbus-write",
+        "z": "887d9079ebe7f11b",
+        "name": "인버터 쓰기",
+        "showStatusActivities": false,
+        "showErrors": false,
+        "showWarnings": true,
+        "unitid": "1",
+        "dataType": "MHoldingRegisters",
+        "adr": "4",
+        "quantity": "1",
+        "server": "f1a2b3c4d5e6f702",
+        "emptyMsgOnFail": false,
+        "keepMsgProperties": false,
+        "delayOnStart": false,
+        "startDelayTime": "",
+        "x": 2040,
+        "y": 140,
+        "wires": [
+            [
+                "e59ad41f5e5a443d"
+            ],
+            []
+        ]
+    },
+    {
+        "id": "e59ad41f5e5a443d",
+        "type": "debug",
+        "z": "887d9079ebe7f11b",
+        "name": "쓰기 결과",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 2220,
+        "y": 140,
+        "wires": []
+    },
+    {
+        "id": "630cf04062a93bd7",
+        "type": "inject",
+        "z": "887d9079ebe7f11b",
+        "name": "0 쓰기 → 레지스터 9 (용도 확인 필요)",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 1600,
+        "y": 210,
+        "wires": [
+            [
+                "30f13a0d72db0455"
+            ]
+        ]
+    },
+    {
+        "id": "30f13a0d72db0455",
+        "type": "function",
+        "z": "887d9079ebe7f11b",
+        "name": "function 5",
+        "func": "msg.payload = [0];\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1860,
+        "y": 210,
+        "wires": [
+            [
+                "c66df3e985253417"
+            ]
+        ]
+    },
+    {
+        "id": "c66df3e985253417",
+        "type": "modbus-write",
+        "z": "887d9079ebe7f11b",
+        "name": "인버터 쓰기",
+        "showStatusActivities": false,
+        "showErrors": false,
+        "showWarnings": true,
+        "unitid": "1",
+        "dataType": "MHoldingRegisters",
+        "adr": "9",
+        "quantity": "1",
+        "server": "f1a2b3c4d5e6f702",
+        "emptyMsgOnFail": false,
+        "keepMsgProperties": false,
+        "delayOnStart": false,
+        "startDelayTime": "",
+        "x": 2040,
+        "y": 210,
+        "wires": [
+            [
+                "3e3a047122c5fea9"
+            ],
+            []
+        ]
+    },
+    {
+        "id": "3e3a047122c5fea9",
+        "type": "debug",
+        "z": "887d9079ebe7f11b",
+        "name": "쓰기 결과",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 2220,
+        "y": 210,
+        "wires": []
+    },
+    {
+        "id": "958b9c6d1e4d1d34",
+        "type": "inject",
+        "z": "887d9079ebe7f11b",
+        "name": "5058 → 레지스터 5 (운전 추정)",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 1600,
+        "y": 280,
+        "wires": [
+            [
+                "52e80fdc4d562a2e"
+            ]
+        ]
+    },
+    {
+        "id": "52e80fdc4d562a2e",
+        "type": "function",
+        "z": "887d9079ebe7f11b",
+        "name": "function 6",
+        "func": "msg.payload = [5058];\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1860,
+        "y": 280,
+        "wires": [
+            [
+                "1223e1ccc0f9b9f4"
+            ]
+        ]
+    },
+    {
+        "id": "1223e1ccc0f9b9f4",
+        "type": "modbus-write",
+        "z": "887d9079ebe7f11b",
+        "name": "인버터 쓰기",
+        "showStatusActivities": false,
+        "showErrors": false,
+        "showWarnings": true,
+        "unitid": "1",
+        "dataType": "MHoldingRegisters",
+        "adr": "5",
+        "quantity": "1",
+        "server": "f1a2b3c4d5e6f702",
+        "emptyMsgOnFail": false,
+        "keepMsgProperties": false,
+        "delayOnStart": false,
+        "startDelayTime": "",
+        "x": 2040,
+        "y": 280,
+        "wires": [
+            [
+                "6087e7ebbfe8768a"
+            ],
+            []
+        ]
+    },
+    {
+        "id": "6087e7ebbfe8768a",
+        "type": "debug",
+        "z": "887d9079ebe7f11b",
+        "name": "쓰기 결과",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 2220,
+        "y": 280,
+        "wires": []
+    },
+    {
+        "id": "cfe56937ec83c3bb",
+        "type": "inject",
+        "z": "887d9079ebe7f11b",
+        "name": "5057 → 레지스터 5 (정지 추정)",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 1600,
+        "y": 350,
+        "wires": [
+            [
+                "dc419e2da763695a"
+            ]
+        ]
+    },
+    {
+        "id": "dc419e2da763695a",
+        "type": "function",
+        "z": "887d9079ebe7f11b",
+        "name": "function 7",
+        "func": "msg.payload = [5057];\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1860,
+        "y": 350,
+        "wires": [
+            [
+                "09ec1a653e5df864"
+            ]
+        ]
+    },
+    {
+        "id": "09ec1a653e5df864",
+        "type": "modbus-write",
+        "z": "887d9079ebe7f11b",
+        "name": "인버터 쓰기",
+        "showStatusActivities": false,
+        "showErrors": false,
+        "showWarnings": true,
+        "unitid": "1",
+        "dataType": "MHoldingRegisters",
+        "adr": "5",
+        "quantity": "1",
+        "server": "f1a2b3c4d5e6f702",
+        "emptyMsgOnFail": false,
+        "keepMsgProperties": false,
+        "delayOnStart": false,
+        "startDelayTime": "",
+        "x": 2040,
+        "y": 350,
+        "wires": [
+            [
+                "e92edb6c7b1c79d0"
+            ],
+            []
+        ]
+    },
+    {
+        "id": "e92edb6c7b1c79d0",
+        "type": "debug",
+        "z": "887d9079ebe7f11b",
+        "name": "쓰기 결과",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 2220,
+        "y": 350,
+        "wires": []
+    },
+    {
+        "id": "3d339cf86fe628c3",
+        "type": "catch",
+        "z": "887d9079ebe7f11b",
+        "name": "통신 오류 수집",
+        "scope": null,
+        "uncaught": false,
+        "x": 180,
+        "y": 760,
+        "wires": [
+            [
+                "162fda09b6405938"
+            ]
+        ]
+    },
+    {
+        "id": "162fda09b6405938",
+        "type": "debug",
+        "z": "887d9079ebe7f11b",
+        "name": "오류 상세 확인",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "true",
+        "targetType": "full",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 420,
+        "y": 760,
+        "wires": []
+    },
+    {
+        "id": "15e929e8840d8a1f",
+        "type": "inject",
+        "z": "887d9079ebe7f11b",
+        "name": "제품 번호 초기화 (demo_reset 뒤, 재생 시작과 같이 누르기)",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 220,
+        "y": 680,
+        "wires": [
+            [
+                "7a2fd9dc216d3128"
+            ]
+        ]
+    },
+    {
+        "id": "7a2fd9dc216d3128",
+        "type": "function",
+        "z": "887d9079ebe7f11b",
+        "name": "번호·평균 비우기",
+        "func": "flow.set('pidSeq', null);\nnode.status({ fill: 'blue', shape: 'dot', text: '초기화 ' + new Date().toLocaleTimeString() });\nreturn null;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 520,
+        "y": 680,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "0783d4dacdef0d0c",
+        "type": "mqtt in",
+        "z": "887d9079ebe7f11b",
+        "name": "sfaas/ctl/replay",
+        "topic": "sfaas/ctl/replay",
+        "qos": "1",
+        "datatype": "auto-detect",
+        "broker": "sfaas_broker",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 140,
+        "y": 500,
+        "wires": [
+            [
+                "9bdbc3fb177dabe3"
+            ]
+        ]
+    },
+    {
+        "id": "9bdbc3fb177dabe3",
+        "type": "function",
+        "z": "887d9079ebe7f11b",
+        "name": "재생 상태 저장",
+        "func": "// ---------------- [코드 A] \"재생 상태 저장\" function ----------------\nconst running = msg.payload && msg.payload.running === true;\nflow.set('replayRunning', running);\nnode.status(running\n    ? { fill: 'green', shape: 'dot', text: '재생 중' }\n    : { fill: 'grey', shape: 'ring', text: '재생 끝' });\nreturn null;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 380,
+        "y": 500,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "f1a2b3c4d5e6f702",
+        "type": "modbus-client",
+        "name": "인버터 서버PC 192.168.0.100:502",
+        "clienttype": "tcp",
+        "bufferCommands": true,
+        "stateLogEnabled": false,
+        "queueLogEnabled": false,
+        "failureLogEnabled": true,
+        "tcpHost": "192.168.0.100",
+        "tcpPort": "502",
+        "tcpType": "DEFAULT",
+        "serialPort": "/dev/ttyUSB",
+        "serialType": "RTU-BUFFERD",
+        "serialBaudrate": "9600",
+        "serialDatabits": "8",
+        "serialStopbits": "1",
+        "serialParity": "none",
+        "serialConnectionDelay": "100",
+        "serialAsciiResponseStartDelimiter": "0x3A",
+        "unit_id": 1,
+        "commandDelay": 10,
+        "clientTimeout": 2000,
+        "reconnectOnTimeout": true,
+        "reconnectTimeout": 2000
+    },
+    {
+        "id": "sfaas_broker",
+        "type": "mqtt-broker",
+        "name": "Mosquitto (localhost)",
+        "broker": "localhost",
+        "port": "1883",
+        "clientid": "sfaas-nodered",
+        "autoConnect": true,
+        "usetls": false,
+        "protocolVersion": "4",
+        "keepalive": "60",
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "closeTopic": "",
+        "willTopic": ""
+    },
+    {
+        "id": "67900440c1ac7767",
+        "type": "Ind MC Protocol Connection",
+        "name": "PLC",
+        "host": "192.168.0.50",
+        "port": "8001",
+        "protocol": "TCP",
+        "frame": "3E",
+        "plcType": "Q",
+        "ascii": false,
+        "PLCStation": "",
+        "PCStation": "",
+        "PLCModuleNo": "",
+        "network": "",
+        "octalInputOutput": false,
+        "timeout": 1000,
+        "autoConnect": true
+    },
+    {
+        "id": "c19623ce527d7a49",
+        "type": "global-config",
+        "env": [],
+        "modules": {
+            "node-red-contrib-modbus": "5.62.1",
+            "node-red-tienho-mcprotocol": "2.0.0"
+        }
+    }
+]

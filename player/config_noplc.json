@@ -1,0 +1,44 @@
+{
+  "broker": {
+    "host": "localhost",
+    "port": 1883,
+    "username": "",
+    "password": ""
+  },
+  "topics": {
+    "raw": "sfaas/raw",
+    "hb": "sfaas/hb",
+    "ctl": "sfaas/ctl"
+  },
+  "csv_dir": "../rehearsal_3min",
+  "csv_suffix": "3min",
+  "duration_sec": 180,
+  "value_naming": "camel",
+  "product_date": "today",
+  "faults": [
+    {
+      "equipment": "C-PR3",
+      "on": 90,
+      "off": 155
+    }
+  ],
+  "slitting": {
+    "enabled": true,
+    "disabled": []
+  },
+  "heartbeat": {
+    "enabled": true,
+    "interval_sec": 1,
+    "disabled": []
+  },
+  "coil": {
+    "enabled": true,
+    "product_qty": 20,
+    "schedule": [
+      {
+        "at_sec": 0,
+        "rolls": 4
+      }
+    ]
+  }
+}
