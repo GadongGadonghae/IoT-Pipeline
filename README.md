@@ -118,6 +118,14 @@ CREATE DATABASE sfaas ENCODING 'UTF8' TEMPLATE template0;
 | `demo_user.sql` | 데모 로그인 계정 abc / 1234 |
 | `demo_reset.sql` | **기록만 비우기** (매번 재생 전에) |
 
+> 🆕 **11/19 DB v0.3.10 (AI 계획수정 보고서 저장):** 위 순서로 새로 만들면 이미 들어 있어요.
+> **11/19 전에 DB를 만들었다면** 아래 한 줄만 더 실행하세요 (기존 데이터는 그대로, 여러 번 실행해도 괜찮아요). 안 하면 백엔드가 `missing column [ai_content]`로 안 켜져요.
+> ```
+> \c sfaas
+> \i C:/sfaas/IoT-Pipeline/alter_v0.3.10.sql
+> ```
+> 마지막에 `kind`, `remaining_plan` 두 줄이 나오면 성공 (중간의 "이미 있습니다" 안내는 정상)
+
 ---
 
 ## 4. 처음 한 번만: Node-RED
@@ -194,8 +202,14 @@ jwt:
 
 mqtt:
   client-id: sfaas-be-내이름
+
+# AI 계획수정 보고서 (선택). Google Gemini 무료 키: https://aistudio.google.com → Get API key → Create API key
+ai:
+  report:
+    api-key: 여기에_Gemini_키
 ```
 - `password`는 3단계 ①의 `sfaas_be` 비밀번호
+- `ai` 부분은 빼도 돼요. 키가 없으면 AI 보고서가 템플릿 문장으로 만들어지고 화면에 "AI 생성 실패 · 템플릿 문장"이라고 나와요
 - DB 주소는 기본값(`localhost`)을 쓰니 `url` 줄은 안 써요
 - 이 파일은 Git에 올라가지 않아요 (비밀번호 보호)
 
@@ -299,6 +313,7 @@ SELECT (SELECT COUNT(*) FROM slitting_data), (SELECT COUNT(*) FROM press_data), 
 | SQL Shell 프롬프트가 `postgres-#` | 입력이 덜 끝난 상태. `\r` 입력 후 다시. `sfaas=#`이 아니면 `\c sfaas` |
 | `role "sfaas_be" does not exist` | 3단계 ①의 `CREATE ROLE`을 안 했어요 |
 | 백엔드 `password authentication failed` | `application-local.yml`의 `username`(sfaas_be)·`password` 확인 |
+| 백엔드 `missing column [ai_content]` | 11/19 전에 만든 DB. 3단계 아래의 `alter_v0.3.10.sql` 실행 |
 | 백엔드 `Port 8080 was already in use` | 백엔드가 이미 켜져 있어요. 다른 창의 백엔드를 `Ctrl+C`로 끄기 |
 | 백엔드 `release version 17 not supported` 등 | JDK 17이 아니에요. `java -version` 확인 |
 | 프론트 `ECONNREFUSED` / `http proxy error` | 백엔드가 꺼져 있어요 (②번 창) |
@@ -330,7 +345,7 @@ SELECT (SELECT COUNT(*) FROM slitting_data), (SELECT COUNT(*) FROM press_data), 
 
 | 위치 | 내용 |
 |---|---|
-| `schema.sql` · `grants.sql` · `seed.sql` · `demo_user.sql` · `demo_reset.sql` · `alter_v0.3.9.sql` | DB (alter는 v0.3.8 DB를 v0.3.9로 올릴 때만) |
+| `schema.sql` · `grants.sql` · `seed.sql` · `demo_user.sql` · `demo_reset.sql` · `alter_v0.3.9.sql` · `alter_v0.3.10.sql` | DB (alter는 예전에 만든 DB를 새 버전으로 올릴 때만) |
 | `player/` | 재생 프로그램 `player.py`, 설정(`config*.json`), API 확인 `api_check.ps1`, 자세한 설명 `README.md` |
 | `nodered/flows_now/` | Node-RED 플로우: `kamp_flows.json`(수집, 필수) · `plc_flows.json`(교육장 실제 인버터용, 선택) |
 | `nodered/*.js` | 플로우 안 함수 코드의 사본 (참고용) |

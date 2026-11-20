@@ -1,6 +1,6 @@
 -- =====================================================================
 -- 라인 가동 현황 모니터링 시스템 · DB 스키마 (PostgreSQL)
--- 1조 가동가동해 · 작성 2026-11-18 · v0.3.9
+-- 1조 가동가동해 · 작성 2026-11-18 · v0.3.10
 --
 -- 실행 방법:  psql -U postgres -d sfaas -f schema.sql
 -- 이 파일이 DB 구조의 "정답지"예요. 테이블을 바꿀 땐 이 파일을 고치고 GitHub에 올려요.
@@ -8,6 +8,10 @@
 --
 -- ★ 현재 처리 시간 (v0.3.9, seed.sql): 슬리팅 16 · 프레스 17 (1대당, 라인에 4대) · 용접 17 · 도장 4 · 비전 검사 2초 (11/18 7→2초)
 --   라인 박자 16초. 프레스(17초 > 박자 16초) 앞에 재공이 조금씩 쌓여요. 아래 버전별 기록의 처리 시간은 그때 값이에요.
+--
+-- v0.3.10 변경 (11/19 계획수정 보고서 저장, alter_v0.3.10.sql)
+--   · reassignment_report에 계산 기준(created_by·kind·base_at·ct_sec·stopped_plan·stopped_done·target_qty·unmet_qty)과 AI 문장(ai_content) 칸 추가
+--   · reassignment_detail.line_id에 도장 설비 ID도 들어가게 (외래키 뺌, VARCHAR(20)), remaining_plan 추가
 --
 -- v0.3.9 변경 (11/18 백엔드 요청: 설비마다 들어간·나간 시각 → 재공·처리 중·대기·CT·제품 추적)
 --   · 🆕 product_flow (공정 이동 기록): 제품이 설비 1대를 거칠 때마다 1줄. 들어갈 때 INSERT(started_at), 나갈 때 UPDATE(ended_at)
@@ -382,15 +386,26 @@ CREATE TABLE reassignment_report (
     created_at    TIMESTAMP   NOT NULL DEFAULT now(),
     approved      BOOLEAN     NOT NULL DEFAULT FALSE,   -- 관리자 승인 여부 (지금은 안 씀)
     approved_by   INTEGER     REFERENCES users(user_id),
-    approved_at   TIMESTAMP
+    approved_at   TIMESTAMP,
+    -- v0.3.10 계획수정 보고서 (R-03): 계산 기준과 AI 문장
+    created_by    INTEGER     REFERENCES users(user_id),  -- 만든 사람
+    kind          VARCHAR(10),                      -- line 라인 전체 정지 / paint 도장 1대 → 다른 1대 / vision 대체 없음
+    base_at       TIMESTAMP,                        -- 계산 기준 시각 (오늘 건 = 만든 시각, 지난 날 건 = 고장 시작)
+    ct_sec        NUMERIC(6,2),                     -- 계산에 쓴 CT
+    stopped_plan  INTEGER,                          -- 멈춘 쪽 그날 계획
+    stopped_done  INTEGER,                          -- 멈춘 쪽 기준 시각까지 실적 (출고 양품)
+    target_qty    INTEGER,                          -- 그날 공장 목표 (없으면 NULL)
+    unmet_qty     INTEGER,                          -- 나눠도 남는 목표 미달 예상
+    ai_content    TEXT                              -- AI(템플릿) 문장 JSON
 );
 
 -- 계획서의 재배정 표: 어느 라인에 몇 개를 더 맡길지 (라인마다 한 줄)
 CREATE TABLE reassignment_detail (
     report_id       BIGINT     NOT NULL REFERENCES reassignment_report(report_id) ON DELETE CASCADE,
-    line_id         VARCHAR(5) NOT NULL REFERENCES line(line_id),
+    line_id         VARCHAR(20) NOT NULL,           -- 라인 ID, 도장 보고서면 도장 설비 ID (v0.3.10)
     spare_capacity  INTEGER    NOT NULL,            -- 여유 능력 = 최대 − 현재 계획
     added_qty       INTEGER    NOT NULL,            -- 추가 배정 수량
+    remaining_plan  INTEGER,                        -- 그 라인(설비)의 남은 계획 (v0.3.10)
     PRIMARY KEY (report_id, line_id)
 );
 
