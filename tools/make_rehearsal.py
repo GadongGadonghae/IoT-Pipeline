@@ -5,8 +5,8 @@
     fault=C-PR3:90:155  고장 설비:시작초:복구초 (복구초 생략 = 끝까지 고장) · fault=none 고장 없음
     switch=PT1>PT2@300  그 초부터 PT1으로 가던 제품을 PT2로 (도장 경로 전환, AI 보고서 승인 연출)
     suffix=s2           파일 이름 꼬리 (press_s2.csv …). 기본 {길이}min
-  예) 시나리오 1: python make_rehearsal.py ../../kamp_data ../scenario_1 10 lines=ABCD fault=none suffix=s1
-      시나리오 2: python make_rehearsal.py ../../kamp_data ../scenario_2 10 lines=ABC fault=PT1:150 switch=PT1>PT2@360 suffix=s2
+  예) 시나리오 1: python make_rehearsal.py ../../kamp_data ../scenario_1 10 lines=ABCDEF fault=none suffix=s1   (E·F는 재생기가 멈춰 둠 → 추가 주문 결재로 가동)
+      시나리오 2: python make_rehearsal.py ../../kamp_data ../scenario_2 10 lines=ABC fault=PT1:150 switch=PT1>PT2@150 suffix=s2   (PT2 값은 재생기가 붙잡았다가 결재 때 보냄)
 - 필요: pandas, openpyxl
 - 출력: press·welding·painting·inspection·slitting_<N>min.csv, rehearsal_<N>min_data.sql, 요약 JSON(화면 출력)
 - 방식: 공정마다 대기열이 있는 시뮬레이션. 앞 공정이 끝난 제품이 줄을 서고, 설비가 비면 처리해요.

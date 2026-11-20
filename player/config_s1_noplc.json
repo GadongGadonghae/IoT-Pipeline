@@ -31,8 +31,12 @@
     "schedule": [
       {
         "at_sec": 0,
-        "rolls": 8
+        "rolls": 12
       }
     ]
-  }
+  },
+  "hold_lines": [
+    "E",
+    "F"
+  ]
 }

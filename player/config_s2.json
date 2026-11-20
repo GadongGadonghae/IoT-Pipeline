@@ -41,5 +41,14 @@
         "rolls": 6
       }
     ]
+  },
+  "route_hold": {
+    "paint": "PT2",
+    "lines": [
+      "A",
+      "B",
+      "C"
+    ],
+    "at": 150
   }
 }

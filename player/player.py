@@ -91,6 +91,9 @@ def load_config(path):
     cfg["coil"].setdefault("product_qty", 20)
     cfg["coil"].setdefault("schedule", [{"at_sec": 0, "rolls": 4}])
     cfg.setdefault("hold_lines", [])   # 🆕 11/20 처음에 멈춰 둘 라인 (추가 주문으로 나중에 가동, --hold 와 같음)
+    # 🆕 11/20 도장 경로 전환 기다리기: {"paint": "PT2", "lines": ["A","B","C"], "at": 150}
+    #   at초부터 그 라인들의 PT2·검사 값을 붙잡아 두고, 경로 전환 명령({ctl}/route 또는 키보드 "route A PT2")을 받으면 그때부터 보내요
+    cfg.setdefault("route_hold", None)
     if cfg["value_naming"] not in ("snake", "camel"):
         sys.exit("[설정 오류] value_naming은 \"camel\" 또는 \"snake\"이어야 해요.")
     if float(cfg["heartbeat"]["interval_sec"]) <= 0:
@@ -313,23 +316,31 @@ class Sender:
         if self.dry or not self.client:
             return
         topic = f"{TOPICS['ctl']}/line"
+        route_topic = f"{TOPICS['ctl']}/route"   # 🆕 11/20 도장 경로 전환 (AI 보고서 결재 → 백엔드가 보냄)
 
         def on_message(_client, _userdata, msg):
             try:
                 body = json.loads(msg.payload.decode("utf-8"))
                 line = str(body.get("lineId", "")).upper()
                 action = str(body.get("action", "")).lower()
+                paint = str(body.get("paintId", "")).upper()
             except Exception:
-                say(f"{YEL}라인 명령을 읽지 못했어요: {msg.payload[:80]!r}{RST}")
+                say(f"{YEL}명령을 읽지 못했어요: {msg.payload[:80]!r}{RST}")
                 return
-            if line in LINES and action in ("start", "hold"):
+            if msg.topic == route_topic:
+                if line in LINES and paint:
+                    cmd_q.put(f"route {line} {paint}")
+                else:
+                    say(f"{YEL}모르는 경로 명령이에요: {body}{RST}")
+            elif line in LINES and action in ("start", "hold"):
                 cmd_q.put(f"{action} {line}")
             else:
                 say(f"{YEL}모르는 라인 명령이에요: {body}{RST}")
 
         self.client.on_message = on_message
         self.client.subscribe(topic, qos=1)
-        say(f"{CYN}라인 가동 명령 받기: {topic} (예: {{\"lineId\":\"D\",\"action\":\"start\"}}){RST}")
+        self.client.subscribe(route_topic, qos=1)
+        say(f"{CYN}라인 가동 명령 받기: {topic} · 도장 경로 전환 받기: {route_topic}{RST}")
 
     @staticmethod
     def _ctl_text(running):
@@ -367,6 +378,7 @@ HELP = (f"{CYN}키보드 명령 (입력 후 Enter)\n"
         f"  f 설비ID → 고장 (예: f C-PR3) | r 설비ID → 복구\n"
         f"  c 설비ID → 통신 끊김 흉내 (예: c C-PR1) | u 설비ID → 통신 다시 연결\n"
         f"  start 라인 → 멈춰 둔 라인 가동 (예: start D) | hold 라인 → 라인 멈추기 (값만 멈춤, 상태 신호는 계속)\n"
+        f"  route 라인 도장 → 도장 경로 전환 (예: route A PT2, 붙잡아 둔 도장 값을 보내기 시작)\n"
         f"  s → 현재 상태 | h → 도움말 | q → 종료{RST}")
 
 
@@ -410,6 +422,8 @@ def main():
                 pause_causes.setdefault(k, set()).add("HOLD:" + line)
                 pause_start.setdefault(k, 0.0)
     dropped = 0                            # 통신 끊김으로 안 보낸 메시지 수
+    route_hold = cfg["route_hold"]         # 🆕 11/20 도장 경로 전환 기다리기 (at초가 되면 붙잡기 시작)
+    route_armed = bool(route_hold)
 
     # 상태 신호를 보낼 설비 (끈 슬리팅은 PLC가 대신하므로 상태 신호도 안 보냄)
     hb_cfg = cfg["heartbeat"]
@@ -508,6 +522,21 @@ def main():
         if c == "s":
             status_line(now_offset())
             return True
+        if c == "route" and len(parts) >= 2:
+            line = parts[1].upper().replace("라인", "")
+            cause = "ROUTE:" + line
+            keys = [k for k in streams if cause in pause_causes.get(k, ())]
+            if not keys:
+                say(f"{YEL}{line}라인은 도장 경로 전환을 기다리고 있지 않아요.{RST}")
+                return True
+            off = now_offset()
+            for k in keys:
+                pause_causes[k].discard(cause)
+                if not pause_causes[k]:
+                    shift[k] += off - pause_start.pop(k)
+                    del pause_causes[k]
+            say(f"{GRN}[{off:6.1f}s] ▶ {line}라인 도장 경로 전환 → {parts[2] if len(parts) > 2 else '새 도장'}에서 칠하기 시작 (AI 보고서 결재){RST}")
+            return True
         if c in ("start", "hold") and len(parts) == 2:
             line = parts[1].upper().replace("라인", "")
             if line not in LINES:
@@ -589,6 +618,19 @@ def main():
     next_status = 5.0
     try:
         while True:
+            off = now_offset()
+            # 🆕 도장 경로 전환 기다리기: at초부터 새 도장·검사 값을 붙잡아 둬요 (결재 → route 명령으로 풀림)
+            if route_armed and off >= float(route_hold["at"]):
+                route_armed = False
+                paint = str(route_hold["paint"]).upper()
+                for L in [x.upper() for x in route_hold["lines"]]:
+                    for k in streams:
+                        if k in (f"{paint}:{L}", f"VI:{L}"):
+                            if not pause_causes.get(k):
+                                pause_causes[k] = set()
+                                pause_start[k] = float(route_hold["at"])
+                            pause_causes[k].add("ROUTE:" + L)
+                say(f"{YEL}[{off:6.1f}s] ■ {', '.join(route_hold['lines'])}라인 도장 경로 전환 대기 → {paint} 값은 결재(route 명령)를 받으면 보내요{RST}")
             # 1) 키보드 명령
             while not cmd_q.empty():
                 if not handle_cmd(cmd_q.get()):
@@ -605,10 +647,12 @@ def main():
                 if not dq:
                     continue
                 causes = pause_causes.get(k)
-                if causes and off >= duration and all(c.startswith("HOLD:") for c in causes):
+                if causes and off >= duration and all(c.startswith(("HOLD:", "ROUTE:")) for c in causes):
                     continue  # 끝까지 가동하지 않은 라인은 기다리지 않아요
                 left = True
-                if causes:
+                # 경로 전환 대기만 걸린 스트림: 대기 시작(at초) 전에 나갈 값은 그대로 보내요 (재생이 잠깐 밀려도 순서 유지)
+                if causes and not (route_hold and all(c.startswith("ROUTE:") for c in causes)
+                                   and dq[0]["t"] + shift[k] < float(route_hold["at"])):
                     continue
                 t = dq[0]["t"] + shift[k]
                 if best_t is None or t < best_t:
