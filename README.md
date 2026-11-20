@@ -329,15 +329,38 @@ SELECT (SELECT COUNT(*) FROM slitting_data), (SELECT COUNT(*) FROM press_data), 
 | 같은 날 두 번째 재생 숫자가 이상함 | 재생 전에 8단계 ④(DB 비우기)를 안 했어요 |
 
 ### 다른 PC의 DB에 붙을 때 (선택)
-백엔드만 내 PC에서 돌리고 DB·Node-RED·player는 다른 PC(예: PM PC)를 쓸 때:
-- `application-local.yml`에 `url: jdbc:postgresql://{그 PC IP}:5432/sfaas` 추가, 비밀번호는 그 PC의 `sfaas_be` 비밀번호
-- ⚠️ **같은 DB에 판정하는 백엔드는 한 대만.** 내 백엔드의 판정을 끄려면 `application-local.yml` 맨 아래에:
+DB·Node-RED·player는 한 PC(예: PM PC)에서 돌리고, 내 PC에서는 **백엔드·프론트만** 켜서 결과를 볼 때예요.
+백엔드는 MQTT를 쓰지 않고 DB만 읽어서, DB에만 붙으면 돼요. 내 PC에는 3~5단계(DB·Node-RED·player)가 필요 없어요.
+
+**① DB PC에서 (한 번만, 관리자 PowerShell)**
+- 방화벽 열기: `New-NetFirewallRule -DisplayName "PostgreSQL 5432" -Direction Inbound -Protocol TCP -LocalPort 5432 -Action Allow -Profile Private`
+- `C:\Program Files\PostgreSQL\17\data\pg_hba.conf` 맨 아래에 한 줄 추가 (같은 와이파이 대역, 예: 192.168.0.x):
+  ```
+  host    sfaas    sfaas_be    192.168.0.0/24    scram-sha-256
+  ```
+- `postgresql.conf`의 `listen_addresses`가 `'*'`인지 확인 (설치 기본값)
+- PostgreSQL 다시 시작: `Restart-Service postgresql-x64-17`
+- DB PC IP 확인: `ipconfig` → 무선 LAN의 IPv4 주소
+
+**② 내 PC (백엔드) `application-local.yml`**
+```yaml
+spring:
+  datasource:
+    url: jdbc:postgresql://{DB PC IP}:5432/sfaas
+    username: sfaas_be
+    password: {DB PC의 sfaas_be 비밀번호}
+```
+- 접속 시험: `Test-NetConnection {DB PC IP} -Port 5432` → `TcpTestSucceeded : True`
+- AI 보고서 키(`ai.report.api-key`)는 내 PC 설정에 넣어요 (6단계)
+
+**③ 판정은 그 DB를 보는 백엔드 한 대만**
+- DB PC에서 백엔드를 **안 켜면**: 내 백엔드가 판정해요. 그대로 두면 돼요 (기본값)
+- DB PC에서도 백엔드를 **켜 두면**: 둘이 같이 판정해서 기록이 겹쳐요. 내 백엔드 판정을 꺼요:
   ```yaml
   sfaas:
     judge:
       enabled: false
   ```
-- 접속 시험: `Test-NetConnection {그 PC IP} -Port 5432` → `TcpTestSucceeded : True`
 
 ---
 
