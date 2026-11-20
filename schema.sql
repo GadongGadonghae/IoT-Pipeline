@@ -1,6 +1,6 @@
 -- =====================================================================
 -- 라인 가동 현황 모니터링 시스템 · DB 스키마 (PostgreSQL)
--- 1조 가동가동해 · 작성 2026-11-18 · v0.3.14 (11/20 목표 변동 보고서 · 캠퍼스장)
+-- 1조 가동가동해 · 작성 2026-11-18 · v0.3.15 (11/20 보고서 결재·전송 · 임시 MES)
 --
 -- 실행 방법:  psql -U postgres -d sfaas -f schema.sql
 -- 이 파일이 DB 구조의 "정답지"예요. 테이블을 바꿀 땐 이 파일을 고치고 GitHub에 올려요.
@@ -8,6 +8,11 @@
 --
 -- ★ 현재 처리 시간 (v0.3.9, seed.sql): 슬리팅 16 · 프레스 17 (1대당, 라인에 4대) · 용접 17 · 도장 4 · 비전 검사 2초 (11/18 7→2초)
 --   라인 박자 16초. 프레스(17초 > 박자 16초) 앞에 재공이 조금씩 쌓여요. 아래 버전별 기록의 처리 시간은 그때 값이에요.
+--
+-- v0.3.15 변경 (11/20, alter_v0.3.15.sql)
+--   · users.role 이름을 MES 명세에 맞춤: PLANT_HEAD 공장장 · PROD_LEAD 생산관리팀장 · LINE_WORKER 라인 담당자 · CAMPUS 캠퍼스장
+--   · users.lines: 라인 담당자의 담당 라인 (조치 쓰기는 이 라인만)
+--   · reports: 보고서 결재·전송 (WRITTEN → APPROVED → SENT), 전송된 것은 임시 MES 수신함
 --
 -- v0.3.14 변경 (11/20, alter_v0.3.14.sql)
 --   · reassignment_report.downtime_id NULL 허용 (목표 변경 보고서 kind = 'target'은 고장 건 없음)
@@ -89,7 +94,7 @@
 -- =====================================================================
 
 -- 다시 실행해도 되도록 기존 테이블을 지우고 새로 만들어요. (데이터도 같이 지워짐!)
-DROP TABLE IF EXISTS inspection, status_log, downtime,   -- v0.3까지의 예전 이름
+DROP TABLE IF EXISTS reports, inspection, status_log, downtime,   -- v0.3까지의 예전 이름
     product_flow, equipment_signal, chat_message, alarm, paint_route_history,
     reassignment_detail, reassignment_report, downtime_event, equipment_status_history,
     inspection_result, painting_data, welding_data, press_data, slitting_data, coil_receipt,
@@ -148,7 +153,8 @@ CREATE TABLE users (
     login_id       VARCHAR(30)  NOT NULL UNIQUE,
     password_hash  VARCHAR(100) NOT NULL,           -- 비밀번호 원문 저장 금지! Spring Security BCrypt 결과를 저장
     user_name      VARCHAR(20)  NOT NULL,           -- 조치 담당자 이름은 여기서 가져와요
-    role           VARCHAR(20)  NOT NULL DEFAULT 'LINE_MANAGER',  -- v0.3.13: PLANT_MANAGER 공장장 · PRODUCTION_MANAGER 생산관리팀장 · LINE_MANAGER 라인 담당자 · (v0.3.14) CAMPUS_HEAD 캠퍼스장
+    role           VARCHAR(20)  NOT NULL DEFAULT 'LINE_WORKER',  -- v0.3.15: PLANT_HEAD 공장장 · PROD_LEAD 생산관리팀장 · LINE_WORKER 라인 담당자 · CAMPUS 캠퍼스장
+    lines          VARCHAR(30),                   -- v0.3.15: 라인 담당자의 담당 라인 (쉼표, 예: 'A,B')
     email          VARCHAR(100),
     memo           VARCHAR(200),
     last_login_at  TIMESTAMP,
@@ -443,3 +449,25 @@ CREATE TABLE chat_message (
     sent_at     TIMESTAMP     NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_chat_sent ON chat_message (sent_at);
+
+-- 보고서 결재·전송 (v0.3.15): 작성(생산관리팀장) WRITTEN → 결재(공장장) APPROVED → 전송(공장장) SENT → 임시 MES(캠퍼스장)
+-- REPLAN(계획수정) 내용은 reassignment_report에, 여기엔 그 번호와 만든 순간의 JSON. DAILY(일일 생산)는 화면이 계산한 내용
+CREATE TABLE reports (
+    report_id         BIGSERIAL    PRIMARY KEY,
+    kind              VARCHAR(10)  NOT NULL,              -- DAILY · REPLAN
+    target_key        VARCHAR(40)  NOT NULL,              -- DAILY = 날짜, REPLAN = 비가동 번호 · TARGET-날짜 · ORDER-보고서번호
+    title             VARCHAR(100) NOT NULL,
+    status            VARCHAR(10)  NOT NULL CHECK (status IN ('WRITTEN', 'APPROVED', 'SENT')),
+    campus_id         VARCHAR(10)  NOT NULL,              -- BODY 차체 · ELEC 전장 (백엔드 설정 plant.campus-id)
+    factory_id        INTEGER      NOT NULL,              -- 캠퍼스 안 공장 번호 (plant.factory-id)
+    content           TEXT,                               -- 보고서 내용 JSON
+    replan_report_id  BIGINT       REFERENCES reassignment_report(report_id) ON DELETE SET NULL,
+    written_by        INTEGER      REFERENCES users(user_id),
+    written_at        TIMESTAMP,
+    approved_by       INTEGER      REFERENCES users(user_id),
+    approved_at       TIMESTAMP,
+    sent_by           INTEGER      REFERENCES users(user_id),
+    sent_at           TIMESTAMP,
+    UNIQUE (kind, target_key)
+);
+CREATE INDEX idx_reports_sent ON reports (sent_at) WHERE status = 'SENT';
