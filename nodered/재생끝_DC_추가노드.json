@@ -1,0 +1,59 @@
+[
+    {
+        "id": "replay_end_in",
+        "type": "mqtt in",
+        "z": "d82ac6542ef3a151",
+        "name": "재생 시작·끝",
+        "topic": "sfaas/ctl/replay",
+        "qos": "1",
+        "datatype": "json",
+        "broker": "sfaas_broker",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 130,
+        "y": 380,
+        "wires": [
+            [
+                "replay_end_fn"
+            ]
+        ]
+    },
+    {
+        "id": "replay_end_fn",
+        "type": "function",
+        "z": "d82ac6542ef3a151",
+        "name": "재생 끝 → 모두 DC",
+        "func": "// ===== 재생 시작·끝 (player가 보냄, retain) =====\n// 끝(running=false)이면 모든 설비의 마지막 신호 시각을 1시간 전으로 돌려서, 백엔드 판정이 1초 안에 모두 DC(통신 끊김)로 바꾸게 해요.\n// 이렇게 안 하면 재생이 끝난 뒤 10초 동안 '후공정 정지 대기'·'재공부족' 같은 가짜 대기가 찍혀요 (11/20)\nconst running = !!(msg.payload && (msg.payload.running === true || msg.payload.running === 'true'));\nglobal.set('replayRunning', running);\nif (running) return null;\nreturn {\n    query: \"UPDATE equipment_signal SET last_seen_at = now() - interval '1 hour', updated_at = now()\",\n    params: [],\n};\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 370,
+        "y": 380,
+        "wires": [
+            [
+                "replay_end_db"
+            ]
+        ]
+    },
+    {
+        "id": "replay_end_db",
+        "type": "postgresql",
+        "z": "d82ac6542ef3a151",
+        "name": "DB (equipment_signal 끊김 처리)",
+        "query": "",
+        "postgreSQLConfig": "sfaas_pg",
+        "split": false,
+        "rowsPerMsg": 1,
+        "outputs": 1,
+        "x": 650,
+        "y": 380,
+        "wires": [
+            []
+        ]
+    }
+]

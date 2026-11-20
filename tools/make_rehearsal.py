@@ -3,6 +3,8 @@
 - 필요: pandas, openpyxl
 - 출력: press·welding·painting·inspection·slitting_<N>min.csv, rehearsal_<N>min_data.sql, 요약 JSON(화면 출력)
 - 방식: 공정마다 대기열이 있는 시뮬레이션. 앞 공정이 끝난 제품이 줄을 서고, 설비가 비면 처리해요.
+  11/20: 프레스 1~4단은 한 줄로 붙어 있어 단 사이에 쌓을 자리가 없어요. 1~3단은 다음 단이 받아 갈 때까지 끝낸 제품을 들고 기다려요
+  (뒤 단이 고장 나면 앞 단은 하던 1개를 끝내고 대기 → 재공은 슬리팅-프레스 사이에 쌓임). 슬리팅→프레스, 프레스4→용접 사이는 그대로 쌓을 수 있어요.
   처리 시간은 흔들림 없이 고정(JITTER = 0). 재공은 공정 처리 시간 차이로만 생겨요 (프레스 17초 > 박자 16초). 11/18: 검사 7→2초로 바꿔 검사 병목을 없앰.
 - 공정 시간(CT), 라인 박자(TAKT), 사건(불량·고장 시각)은 아래 상수에서 바꿔요.
 - 제품 번호(product_id): 슬리팅 투입 때 생겨요 ({라인}-{날짜}-{라인 안 순번 4자리}). 모든 공정 메시지에 붙어요.
@@ -110,8 +112,13 @@ for line in LINES:
     k = 0
     while TAKT * k < END:
         t = float(TAKT * k)                     # 슬리팅 투입 시각
+        prev = None                             # 바로 앞 단 설비 (프레스 단 사이 막힘용)
         for kind, eq, base in stages:
             start, done = run(eq, free[eq], t, base)
+            # 프레스 1~3단은 이 제품이 다음 단에 들어갈 때(start)까지 들고 있어서, 그때부터 다음 제품을 받을 수 있어요 (11/20)
+            if prev and prev.split("-")[1] in ("PR1", "PR2", "PR3"):
+                free[prev] = start
+            prev = eq
             if done > END:
                 t = None
                 break

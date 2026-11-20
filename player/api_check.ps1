@@ -35,7 +35,7 @@ if ($mode -eq "live") {
         $st | Group-Object status | ForEach-Object { "  $($_.Name): $($_.Count)대" }
         $c = $st | Where-Object equipmentId -eq "C-PR3"
         "  C-PR3 → status=$($c.status), reasonCode=$($c.reasonCode), since=$($c.since)"
-        Write-Expect "90~155초 사이면 C-PR3 status=D, reasonCode=UP_BREAKDOWN. C-PR4·C-WD는 재공이 떨어지면 I(UP_SHORTAGE)"
+        Write-Expect "90~155초 사이면 C-PR3 status=D, reasonCode=UP_BREAKDOWN. C-PR1·PR2는 하던 1개를 끝내고 I(UP_BLOCKED 후공정 정지 대기), C-PR4·C-WD는 재공이 떨어지면 I(UP_SHORTAGE)"
     }
     Write-Title "② 진행 중 비가동 (U-08 /downtime/events?inProgress=true)"
     $ev = Get-Api "/downtime/events?from=$d&to=$d&inProgress=true&minMinutes=0&size=100"
@@ -66,7 +66,7 @@ Write-Title "② 재공 (M-13 /production/wip)"
 $wip = Get-Api "/production/wip"
 if ($wip) {
     $wip | ForEach-Object { "  $($_.process) → $($_.nextProcess): $($_.wipQty)" }
-    Write-Expect "코일→슬리팅 14 · 슬리팅→프레스 12 · 프레스→용접 5 · 용접→도장 1 · 도장→검사 1"
+    Write-Expect "코일→슬리팅 14 · 슬리팅→프레스 16 (C라인 6) · 프레스→용접 5 · 용접→도장 1 · 도장→검사 1"
 }
 
 Write-Title "③ 공정 불량 (P-01 /production/process-ng)"

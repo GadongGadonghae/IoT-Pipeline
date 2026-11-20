@@ -118,13 +118,15 @@ CREATE DATABASE sfaas ENCODING 'UTF8' TEMPLATE template0;
 | `demo_user.sql` | 데모 로그인 계정 abc / 1234 |
 | `demo_reset.sql` | **기록만 비우기** (매번 재생 전에) |
 
-> 🆕 **11/19 DB v0.3.10 (AI 계획수정 보고서 저장):** 위 순서로 새로 만들면 이미 들어 있어요.
-> **11/19 전에 DB를 만들었다면** 아래 한 줄만 더 실행하세요 (기존 데이터는 그대로, 여러 번 실행해도 괜찮아요). 안 하면 백엔드가 `missing column [ai_content]`로 안 켜져요.
+> 🆕 **예전에 DB를 만들었다면** 위 순서 대신 아래만 더 실행하세요 (기존 데이터는 그대로, 여러 번 실행해도 괜찮아요). 새로 만들면 이미 들어 있어요.
 > ```
 > \c sfaas
 > \i C:/sfaas/IoT-Pipeline/alter_v0.3.10.sql
+> \i C:/sfaas/IoT-Pipeline/alter_v0.3.11.sql
 > ```
-> 마지막에 `kind`, `remaining_plan` 두 줄이 나오면 성공 (중간의 "이미 있습니다" 안내는 정상)
+> - v0.3.10 (11/19, AI 계획수정 보고서 저장): 안 하면 백엔드가 `missing column [ai_content]`로 안 켜져요. 마지막에 `kind`, `remaining_plan` 두 줄
+> - v0.3.11 (11/20, 비가동 코드 `UP_BLOCKED` 후공정 정지 대기): 안 하면 프레스 단이 멈춘 뒤 판정 저장이 실패해요. 마지막에 `UP_BLOCKED` 한 줄
+> - 중간의 "이미 있습니다" 안내는 정상
 
 ---
 
@@ -156,6 +158,11 @@ node-red
 **⑤ 확인**
 - MQTT 노드 2개(`sfaas/raw/#`, `sfaas/hb/#`) 아래에 초록 **connected**
 - 탭이 흐리게(꺼짐) 보이면: 탭 이름 더블클릭 → 아래쪽 **Enabled** 켜기 → Done → Deploy
+
+> 🆕 **11/20 이전에 Node-RED를 설정했다면 (재생 끝 정리 노드):** 위에서 새로 가져오면 이미 들어 있어요. 기존 것을 그대로 쓰면
+> 1. 메뉴 ≡ → **Import** → `nodered/재생끝_DC_추가노드.json` → "SFaaS 수집" 탭에 넣기 (노드 3개: 재생 시작·끝 → 재생 끝 → 모두 DC → DB)
+> 2. `sfaas/hb/#` 옆 상태 신호 함수 노드 맨 위에 한 줄: `if (global.get('replayRunning') === false) return null;`
+> 3. **Deploy**. 재생이 끝나면 1~2초 안에 모든 설비가 DC가 되고, 끝난 뒤 가짜 대기(후공정 정지 대기·재공부족)가 안 생겨요
 
 ---
 
@@ -368,7 +375,7 @@ spring:
 
 | 위치 | 내용 |
 |---|---|
-| `schema.sql` · `grants.sql` · `seed.sql` · `demo_user.sql` · `demo_reset.sql` · `alter_v0.3.9.sql` · `alter_v0.3.10.sql` | DB (alter는 예전에 만든 DB를 새 버전으로 올릴 때만) |
+| `schema.sql` · `grants.sql` · `seed.sql` · `demo_user.sql` · `demo_reset.sql` · `alter_v0.3.9.sql` · `alter_v0.3.10.sql` · `alter_v0.3.11.sql` | DB (alter는 예전에 만든 DB를 새 버전으로 올릴 때만) |
 | `player/` | 재생 프로그램 `player.py`, 설정(`config*.json`), API 확인 `api_check.ps1`, 자세한 설명 `README.md` |
 | `nodered/flows_now/` | Node-RED 플로우: `kamp_flows.json`(수집, 필수) · `plc_flows.json`(교육장 실제 인버터용, 선택) |
 | `nodered/*.js` | 플로우 안 함수 코드의 사본 (참고용) |
