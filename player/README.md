@@ -62,6 +62,8 @@ pip install -r requirements.txt
 | `faults` | C-PR3 90→155초 | 자동 고장 일정. `equipment`, `on`(고장 초), `off`(복구 초) |
 | `slitting.enabled` | `true` | 가상 슬리팅 신호(`slitting_3min.csv`) 전체 켜기/끄기 |
 | `slitting.disabled` | `[]` | 끌 슬리팅 설비. PLC 연결 후에는 `["A-SL"]` |
+| 🆕 `slitting.values` | `plc` | 슬리팅 측정값. `plc` = 값 없이 보내고 Node-RED가 실제 인버터(A-SL) 값으로 채움 · `dummy` = 이 프로그램이 토크·전류·전압 **더미 값**을 넣음 (인버터 없이 시연 영상용). `*_noplc.json`은 `dummy` |
+| 🆕 `slitting.dummy` | 토크 12.0±0.6 · 전류 3.5±0.2 · 전압 220±2.5 | 더미 값 범위 `{"항목": [가운데, 흔들림]}`. ⚠️ 가짜 시연 값 (실측 아님). 같은 제품 번호면 늘 같은 값 |
 | `heartbeat.enabled` | `true` | 상태 신호 전체 켜기/끄기 |
 | `heartbeat.interval_sec` | `1` | 상태 신호 간격(초). 0초부터 시작 |
 | `heartbeat.disabled` | `[]` | 상태 신호를 끌 설비. 예: `["A-SL"]` |
@@ -74,6 +76,15 @@ pip install -r requirements.txt
 > ⚠️ 상태 신호를 끄면(`heartbeat.enabled: false`) **고장·복구도 알릴 수 없어요** (고장 여부가 상태 신호 안에 들어 있어서).
 
 > 💡 `slitting.disabled`에 넣은 슬리팅 설비는 **상태 신호도 자동으로 꺼져요** (PLC가 대신 보내니까).
+
+> 🆕 **슬리팅 더미 → Node-RED(실제 인버터)로 바꾸기** (11/21)
+> | 하고 싶은 것 | 설정 |
+> |---|---|
+> | 인버터 없이 시연 영상 (지금) | `"slitting": {"values": "dummy", "disabled": []}` → 6대 모두 더미 값 |
+> | A-SL만 실제 인버터, 나머지 더미 | `"slitting": {"values": "dummy", "disabled": ["A-SL"]}` + Node-RED "A-SL 슬리팅" 탭의 `sfaas/raw/A-SL` 출력 노드 켜기 |
+> | 예전처럼 6대 모두 인버터 값 복사 | `"slitting": {"values": "plc"}` (Node-RED 정제가 A-SL 16초 평균을 6대에 채움) |
+>
+> Node-RED 정제는 메시지에 값이 **없을 때만** 인버터 값을 채워요. 그래서 더미 값이 있으면 더미가, 없으면 인버터 값이 들어가요 (Node-RED는 고칠 것 없음).
 
 > ⚠️ `faults`를 바꿔도 **CSV의 시각은 바뀌지 않아요.** 지금 CSV는 "C-PR3 90~155초 고장"에 맞춰 만들어져 있어요.
 > 고장 일정을 바꾸려면 `sfaas/tools/make_rehearsal.py`로 CSV도 다시 만들어야 해요.

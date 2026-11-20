@@ -4,7 +4,7 @@
 -- 실행 방법:  \i C:/jyc/sfaas_project/sfaas/demo_reset.sql
 --
 -- 🗑️ 지움   : "오늘 13:00 이후" 기록만 (리허설·시연은 점심 뒤에 시작) — 측정값(슬리팅·프레스·용접·도장), 코일 입고, 검사, 상태 이력, 비가동, 알람,
---             도장 경로 이력, 재배정 계획서, 공정 이동 기록(product_flow)
+--             도장 경로 이력, 재배정 계획서, 보고서 결재·전송 기록(reports), 공정 이동 기록(product_flow)
 --             + 설비 신호, 채팅, 테스트 계정(test_manager)
 -- ✅ 그대로 : 오늘 13:00 전까지의 기록 (make_history.py로 넣은 과거 며칠 + 오늘 오전 더미), 공정, 라인, 설비, 비가동 코드, 사용자,
 --             관리값 기준(SCR-009에서 고친 값 포함), 생산 목표
@@ -16,6 +16,11 @@ SET client_encoding = 'UTF8';
 BEGIN;
 
 -- 1. 오늘 기록 비우기 (외래키 순서대로). 끝나지 않은(열린) 상태·비가동·이동 기록도 같이 지워요
+-- 공장 목표 변경 기록 (v0.3.16 target_change): 오늘 13:00 이후 올린 목표의 배정 대기
+DELETE FROM target_change WHERE changed_at >= CURRENT_DATE + TIME '13:00';
+-- 보고서 결재·전송 기록 (v0.3.15 reports): 리셋 뒤 결재 줄이 "완료"로 남지 않게 (11/20)
+DELETE FROM reports WHERE COALESCE(written_at, approved_at, sent_at) >= CURRENT_DATE + TIME '13:00'
+   OR replan_report_id IN (SELECT report_id FROM reassignment_report WHERE created_at >= CURRENT_DATE + TIME '13:00');
 DELETE FROM reassignment_report r USING downtime_event d
 WHERE r.downtime_id = d.downtime_id AND (d.started_at >= CURRENT_DATE + TIME '13:00' OR d.ended_at IS NULL);
 DELETE FROM reassignment_report WHERE created_at >= CURRENT_DATE + TIME '13:00';

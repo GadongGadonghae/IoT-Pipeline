@@ -15,10 +15,18 @@
   "duration_sec": 600,
   "value_naming": "camel",
   "product_date": "today",
-  "faults": [],
+  "faults": [
+    {
+      "equipment": "C-PR3",
+      "on": 180,
+      "off": 360,
+      "pause": true
+    }
+  ],
   "slitting": {
     "enabled": true,
-    "disabled": []
+    "disabled": [],
+    "values": "dummy"
   },
   "heartbeat": {
     "enabled": true,
@@ -38,5 +46,6 @@
   "hold_lines": [
     "E",
     "F"
-  ]
+  ],
+  "warm_start_sec": 120
 }

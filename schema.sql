@@ -457,7 +457,7 @@ CREATE TABLE reports (
     kind              VARCHAR(10)  NOT NULL,              -- DAILY · REPLAN
     target_key        VARCHAR(40)  NOT NULL,              -- DAILY = 날짜, REPLAN = 비가동 번호 · TARGET-날짜 · ORDER-보고서번호
     title             VARCHAR(100) NOT NULL,
-    status            VARCHAR(10)  NOT NULL CHECK (status IN ('WRITTEN', 'APPROVED', 'SENT')),
+    status            VARCHAR(10)  NOT NULL CHECK (status IN ('DRAFT', 'WRITTEN', 'APPROVED', 'SENT')),   -- v0.3.16 DRAFT 작성 중
     campus_id         VARCHAR(10)  NOT NULL,              -- BODY 차체 · ELEC 전장 (백엔드 설정 plant.campus-id)
     factory_id        INTEGER      NOT NULL,              -- 캠퍼스 안 공장 번호 (plant.factory-id)
     content           TEXT,                               -- 보고서 내용 JSON
@@ -471,3 +471,27 @@ CREATE TABLE reports (
     UNIQUE (kind, target_key)
 );
 CREATE INDEX idx_reports_sent ON reports (sent_at) WHERE status = 'SENT';
+
+-- 2. 공장 목표 변경 기록 (11/20): 공장장이 오늘 목표를 올리면 이전·새 목표를 남겨요.
+--    늘어난 수량(after − 라인 목표 합) = 추가 주문 · 배정 대기 → 생산관리팀장 추가 주문 배정 보고서 → 공장장 결재 때 라인 목표에 들어가고 closed_at
+CREATE TABLE IF NOT EXISTS target_change (
+    change_id    BIGSERIAL PRIMARY KEY,
+    target_date  DATE      NOT NULL,
+    before_qty   INTEGER   NOT NULL,                   -- 올리기 전 라인 목표 합
+    after_qty    INTEGER   NOT NULL,                   -- 공장장이 새로 정한 공장 목표
+    changed_by   INTEGER   REFERENCES users(user_id),
+    changed_at   TIMESTAMP NOT NULL,
+    report_id    BIGINT    REFERENCES reassignment_report(report_id) ON DELETE SET NULL,   -- 이 변경으로 만든 추가 주문 배정 보고서
+    closed_at    TIMESTAMP                             -- 결재로 라인에 들어갔거나 다시 바뀌어 대신한 시각 (NULL = 배정 대기)
+);
+CREATE INDEX IF NOT EXISTS idx_target_change_open ON target_change (target_date) WHERE closed_at IS NULL;
+
+-- 3. 시연용 가상 시계 (11/21): 한 줄(active = TRUE)만 써요. 가상 시각 = virtual_at + (실제 지금 − real_at) × speed
+--    백엔드가 1초마다 읽고, 재생기·화면도 같은 시계를 써요 (실제 시각과 상관없이 09:00~18:00 근무를 보여 주려고)
+CREATE TABLE IF NOT EXISTS sim_clock (
+    id          INTEGER   PRIMARY KEY DEFAULT 1,
+    virtual_at  TIMESTAMP NOT NULL,                  -- real_at 때의 가상 시각
+    real_at     TIMESTAMP NOT NULL,                  -- 기준 실제 시각 (KST)
+    speed       NUMERIC(8,2) NOT NULL DEFAULT 1,     -- 배속 (가상 1초 = 실제 1/speed초)
+    active      BOOLEAN   NOT NULL DEFAULT FALSE
+);

@@ -7,6 +7,16 @@
   - 그 SQL은 맨 앞에서 "기준 날짜 이전 기록"을 전부 지우고 새로 넣어요 → 몇 번 다시 넣어도 결과가 같아요.
     오늘(기준 날짜) 기록은 건드리지 않아요.
   - 필요: pandas, numpy, openpyxl
+  🆕 11/21 시연 영상용 "오늘 중간부터" (--now):
+      python make_history.py --now 14:30 --today-lines ABCD --per-line 100
+      → 지난 3일 + 오늘은 (지금 − 약 30분) ~ 지금(14:30)까지 A~D가 라인당 약 100개(총 약 400개)를 만든 기록,
+        E·F는 오늘 시작부터 계획정지(진행 중). 오늘 목표 2000 = A~D 500씩. 오늘 기록은 통째로 새로 넣어요.
+        이 SQL을 넣자마자 재생기를 시작하면 "이미 돌던 공장"에 이어서 흘러요 (제품 번호 5001~ → 재생은 0001~).
+  🆕 11/21 하루 근무 시연 (--shift): 근무 09:00~18:00, 목표 1000개를 4라인(A~D)이 만드는 "느린 공장"
+      python make_history.py --shift 09:00-18:00 --prep-until 11:00 --target 1000
+      → 지난 3일(같은 근무·속도) + 오늘 09:00~11:00 기록(SQL) + 오늘 11:00~18:00 재생 CSV(scenario_shift/*_shift.csv, E·F 포함)
+        같은 시뮬레이션에서 나눠서 제품 번호·흐름이 이어져요. 공정 표준 CT(process.cycle_time_sec)도 느린 속도로 바꿔요
+  🆕 KAMP 원본 엑셀이 없으면 시나리오 CSV(scenario_1·2, rehearsal_*)의 KAMP 측정값을 재료로 써요 (--pool로 폴더 지정 가능)
 
 하루 흐름: 08:00 투입 시작 → 12:00~13:00 점심(계획정지 PL_SHIFT) → 19:00 투입 끝 (이미 들어간 제품은 끝까지 처리)
   처리 시간은 리허설과 같고(make_rehearsal.py) ±3% 흔들림. 라인 박자 17초(프레스와 같게 → 재공이 계속 쌓이지 않음)
@@ -28,6 +38,19 @@ ap.add_argument("--days", type=int, default=3, help="만들 날 수 (기본 3)")
 ap.add_argument("--no-morning", action="store_true", help="기준 날짜(오늘) 오전 더미를 넣지 않음")
 ap.add_argument("--kamp", default=os.path.join(HERE, "..", "..", "kamp_data"), help="KAMP 원본 폴더")
 ap.add_argument("--out", default=os.path.join(HERE, "..", "history"), help="출력 폴더")
+ap.add_argument("--pool", nargs="*", default=None, help="KAMP 원본 대신 측정값을 가져올 시나리오 CSV 폴더 (원본이 없으면 자동)")
+ap.add_argument("--now", default=None, help="오늘 중간부터 (HH:MM[:SS]): 이 시각까지 오늘 기록을 채움 (오전 더미 대신)")
+ap.add_argument("--today-lines", default="ABCD", help="--now: 오늘 가동한 라인 (나머지는 계획정지 진행 중)")
+ap.add_argument("--per-line", type=int, default=None, help="--now: 라인당 만든 수 (대략). --today-total이 우선")
+ap.add_argument("--today-total", type=int, default=1000, help="--now: 오늘 지금까지 만든 수 (가동 라인 합, 대략)")
+ap.add_argument("--today-hours", type=float, default=2.0, help="--now: 지금보다 몇 시간 전부터 가동했는지")
+ap.add_argument("--today-breaks", type=int, default=2, help="--now: 오늘 고장 건수 (30~50분, 가동률 80%% 안팎)")
+ap.add_argument("--today-ng", type=float, default=3.0, help="--now: 오늘 불량(공정·비전) 비율 배수 (불량률이 쌓여 보이게)")
+ap.add_argument("--shift", default=None, help="하루 근무 시연 (예: 09:00-18:00). --prep-until까지 DB, 그 뒤는 재생 CSV")
+ap.add_argument("--prep-until", default="11:00", help="--shift: 준비 때 DB에 넣을 끝 시각 (재생은 여기서부터)")
+ap.add_argument("--shift-takt", type=float, default=145.0, help="--shift: 라인 박자(초). 145초면 4라인이 9시간에 약 880개")
+ap.add_argument("--csv-out", default=os.path.join(HERE, "..", "scenario_shift"), help="--shift: 재생 CSV 폴더")
+ap.add_argument("--target", type=int, default=2000, help="--now: 오늘 공장 목표 (가동 라인에 똑같이)")
 args = ap.parse_args()
 BASE = date.fromisoformat(args.base)
 DAYS = [BASE - timedelta(days=n) for n in range(args.days, 0, -1)]
@@ -78,17 +101,52 @@ def split(df, th):
     return df[ok].reset_index(drop=True), df[~ok & df[list(th)].notna().all(axis=1)].reset_index(drop=True)
 
 kamp = args.kamp
-p = pd.read_excel(f"{kamp}/07. Dataset_Press/dataset/Press_RawDataSet.xlsx").rename(columns={
-    "Press time(ms)": "press_time", "Pressure 1": "pressure_left", "Pressure 2": "pressure_right"})
-p["pressure_diff"] = p.pressure_left - p.pressure_right
+KAMP_PRESS = f"{kamp}/07. Dataset_Press/dataset/Press_RawDataSet.xlsx"
+if args.pool is None and os.path.exists(KAMP_PRESS):
+    p = pd.read_excel(KAMP_PRESS).rename(columns={
+        "Press time(ms)": "press_time", "Pressure 1": "pressure_left", "Pressure 2": "pressure_right"})
+    p["pressure_diff"] = p.pressure_left - p.pressure_right
+    w = pd.read_excel(f"{kamp}/05. Dataset_Welding/dataset/Welding Data Set_01.xlsx").rename(columns={
+        "weld force(bar)": "press_force", "weld current(kA)": "current", "weld Voltage(v)": "voltage", "weld time(ms)": "weld_time"})
+    c = pd.read_csv(f"{kamp}/Dataset_품질 이상탐지 진단(도금욕) AI 데이터셋/data/kemp-abh-sensor-2021.09.06.csv").rename(columns={
+        "pH": "ph", "Temp": "temperature", "Current": "current", "Voltage": "voltage"})
+else:
+    # 🆕 11/21 원본 엑셀이 없을 때: 시나리오·리허설 CSV에 들어 있는 KAMP 측정값(원본에서 뽑은 정상 범위 값)을 재료로
+    import glob
+    dirs = args.pool or [os.path.join(HERE, "..", d) for d in ("scenario_1", "scenario_2", "rehearsal_10min", "rehearsal_5min", "rehearsal_3min")]
+    read = lambda kind: pd.concat([pd.read_csv(f, encoding="utf-8-sig") for d in dirs for f in glob.glob(os.path.join(d, f"{kind}_*.csv"))],
+                                  ignore_index=True)
+    pr, wd, pt = read("press"), read("welding"), read("painting")
+    if pr.empty or wd.empty or pt.empty:
+        raise SystemExit("[오류] KAMP 원본도, 측정값을 가져올 시나리오 CSV도 없어요 (--kamp 또는 --pool 확인)")
+    n = 4000
+    # 프레스 CSV는 줄마다 1개 항목만 → 항목마다 따로 뽑아 한 줄로
+    p = pd.DataFrame({col: pr[col].dropna().sample(n, replace=True, random_state=k).to_numpy() for k, col in enumerate(PRESS_COLS)})
+    w = wd[list(TH["weld"])].dropna().reset_index(drop=True)
+    c = pt[list(TH["paint"])].dropna().reset_index(drop=True)
+
+    def with_bad(df, th, k=60):
+        """기준 밖 행이 없으면 정상 행 하나의 한 항목을 기준 바로 바깥으로 (불량·알람 연출용)"""
+        rows = df.sample(k, replace=True, random_state=7).reset_index(drop=True)
+        for i in range(k):
+            col = list(th)[i % len(th)]
+            lo, hi = th[col]
+            rows.loc[i, col] = round(hi + (hi - lo) * random.uniform(0.02, 0.08), 3)
+        return pd.concat([df, rows], ignore_index=True)
+    w, c = with_bad(w, TH["weld"]), with_bad(c, TH["paint"])
+    print(f"KAMP 원본 없음 → 시나리오 CSV 값을 재료로 써요 (프레스 {len(pr)} · 용접 {len(wd)} · 도장 {len(pt)}줄)")
 p_ok, _ = split(p, TH["press"])
 p_bad = {it: p.loc[~p[it].between(*TH["press"][it]) & p[it].notna(), it].to_numpy() for it in PRESS_COLS}
-w = pd.read_excel(f"{kamp}/05. Dataset_Welding/dataset/Welding Data Set_01.xlsx").rename(columns={
-    "weld force(bar)": "press_force", "weld current(kA)": "current", "weld Voltage(v)": "voltage", "weld time(ms)": "weld_time"})
 w_ok, w_bad = split(w, TH["weld"])
-c = pd.read_csv(f"{kamp}/Dataset_품질 이상탐지 진단(도금욕) AI 데이터셋/data/kemp-abh-sensor-2021.09.06.csv").rename(columns={
-    "pH": "ph", "Temp": "temperature", "Current": "current", "Voltage": "voltage"})
 c_ok, c_bad = split(c, TH["paint"])
+
+# 🆕 11/21 슬리팅 측정값 더미 (재생기 slitting.values = "dummy"와 같은 범위). ⚠️ 가짜 시연 값
+import zlib
+SL_DUMMY = {"torque": (12.0, 0.6), "current": (3.5, 0.2), "voltage": (220.0, 2.5)}
+def sl_vals(eq, pid):
+    rnd = random.Random(zlib.crc32(f"{eq}|{pid}".encode()))
+    shift = ("ABCDEF".index(eq[0]) - 2.5) / 2.5
+    return [round(max(c0 - s0 * 2, min(c0 + s0 * 2, c0 + shift * s0 * 0.5 + rnd.gauss(0, s0 / 2))), 2) for c0, s0 in SL_DUMMY.values()]
 
 def pick(df, cols):
     r = df.iloc[random.randrange(len(df))]
@@ -279,7 +337,8 @@ def timeline(rows, breaks, lunch_from_last=False):
         for e, a, b in breaks:
             if e == eq:
                 arr[a - OPEN:b - OPEN] = D
-        arr[LUNCH[0] - OPEN:LUNCH[1] - OPEN] = S
+        if LUNCH[1] > OPEN:
+            arr[max(0, LUNCH[0] - OPEN):LUNCH[1] - OPEN] = S
         arr[int(math.ceil(last)) - OPEN:] = OFF
         segs, i = [], 0
         while i < L:
@@ -317,9 +376,17 @@ def copy(table, cols, recs):
     out_lines.append("\\.")
 
 first, base_s = DAYS[0].isoformat(), BASE.isoformat()
-MORNING = not args.no_morning
+SHIFT_MODE = args.shift is not None
+if SHIFT_MODE:
+    args.now = args.prep_until
+    if args.target == 2000:
+        args.target = 1000
+NOW_MODE = args.now is not None
+MORNING = not args.no_morning and not NOW_MODE
 # 지우는 경계: 오전 더미를 넣으면 오늘 13:00 전까지 (그 뒤 = 실제 리허설·시연 기록은 그대로)
 cut = f"{base_s} {DEMO_START // 3600:02d}:00:00" if MORNING else base_s
+if NOW_MODE:   # 오늘 기록도 통째로 새로 (시연 시작 직전)
+    cut = (BASE + timedelta(days=1)).isoformat()
 MORNING_NOTE = (f"+ 오늘({base_s}) 오전 08:00~12:00 가동 더미 + 점심~13:00 (리허설은 13:00 뒤 시작, 제품 번호 5001~)"
                 if MORNING else "오늘 오전 더미 없음 (--no-morning)")
 out_lines.append(f"""-- =====================================================================
@@ -347,38 +414,296 @@ DELETE FROM inspection_result WHERE inspected_at < '{cut}';
 DELETE FROM coil_receipt WHERE received_at < '{cut}';
 DELETE FROM paint_route_history WHERE changed_at < '{cut}';
 DELETE FROM production_target WHERE target_date < '{base_s}';
+-- 지난 날 보고서 결재·전송 기록과 고장 건 없는 계획수정 보고서 (11/21 더미 보고서를 다시 넣으려고)
+DELETE FROM reports WHERE COALESCE(written_at, approved_at, sent_at) < '{cut}';
+DELETE FROM reassignment_report WHERE downtime_id IS NULL AND created_at < '{cut}';
+""")
+if NOW_MODE:
+    out_lines.append(f"""-- 오늘 중간부터 (--now): 오늘 만든 보고서·결재·목표 변경도 비워요 (시연을 처음부터)
+DELETE FROM reports WHERE COALESCE(written_at, approved_at, sent_at) >= '{base_s}'
+   OR replan_report_id IN (SELECT report_id FROM reassignment_report WHERE created_at >= '{base_s}');
+DELETE FROM target_change WHERE target_date >= '{base_s}';
+DELETE FROM reassignment_report WHERE created_at >= '{base_s}';
+UPDATE line SET current_paint_id = default_paint_id WHERE current_paint_id IS DISTINCT FROM default_paint_id;
+TRUNCATE equipment_signal;
 """)
 
 summary = []
 group_no = 0
-for day, morning_only in [(x, False) for x in DAYS] + ([(BASE, True)] if MORNING else []):
-    if morning_only:
+
+# ---------------- 🆕 11/21 지난 날 보고서 더미: 일일 생산 보고서(전송 완료) + 고장마다 AI 계획수정 보고서(결재·전송 완료) ----------------
+EQ_NAME = {"SL": "슬리팅 1호기", "WD": "용접 1호기"}
+def eq_name(eq):
+    st = eq.split("-")[1]
+    return f"{eq[0]}라인 " + (EQ_NAME.get(st) or f"프레스 {st[2]}호기")
+def q(v):
+    return "'" + str(v).replace("'", "''") + "'"
+def jtxt(o):
+    return q(json.dumps(o, ensure_ascii=False))
+pct = lambda v: f"{v:.1f}%"
+fmt = lambda n: f"{int(n):,}"
+WRITER = "(SELECT user_id FROM users WHERE role = 'PROD_LEAD' ORDER BY user_id LIMIT 1)"
+BOSS = "(SELECT user_id FROM users WHERE role = 'PLANT_HEAD' ORDER BY user_id LIMIT 1)"
+
+def past_reports(day, rows, breaks, tl, vi, alarms):
+    d = lambda sec: ts(day, sec)
+    ymd = day.strftime("%Y%m%d")
+    ok = {l: sum(1 for r in vi if r["line"] == l and r["result"] == "OK") for l in LINES}
+    ng_line = {l: sum(1 for r in rows if r["line"] == l and r["result"] == "NG") for l in LINES}
+    total_ok = sum(ok.values())
+    total_ng = sum(ng_line.values())
+    plan = TARGET * len(LINES)
+    # 가동률: 라인 설비의 가동(R) 시간 ÷ (가동 + 대기 + 고장) 시간 (점심 계획정지 제외)
+    run = tot = 0
+    for eq, segs in tl.items():
+        if "-" not in eq:
+            continue
+        for code, a, b in segs:
+            if code == S or b is None:
+                continue
+            tot += b - a
+            run += (b - a) if code == R else 0
+    avail = run / tot * 100 if tot else 0
+    quality = total_ok / (total_ok + total_ng) * 100 if total_ok + total_ng else 0
+    perf = min(99.0, total_ok / max(1, plan) * 100 / max(0.01, avail / 100))
+    oee = avail * perf * quality / 1e4
+    reps = []
+    # 고장마다 계획수정 보고서 (고장 5분 뒤 작성 → 15분 뒤 결재 → 20분 뒤 전송)
+    for n, (eq, a, b) in enumerate(sorted(breaks, key=lambda x: x[1]), 1):
+        line, base = eq[0], a + 300
+        done = sum(1 for r in vi if r["line"] == line and r["result"] == "OK" and r["t"] < base)
+        loss = max(1, int((b - a) / TAKT))
+        others = [l for l in LINES if l != line]
+        rem_sec = CLOSE - base
+        rows_d = []
+        each, rest = divmod(loss, len(others))
+        for i, l in enumerate(others):
+            done_l = sum(1 for r in vi if r["line"] == l and r["result"] == "OK" and r["t"] < base)
+            rp = max(0, TARGET - done_l)
+            cap = max(0, int(rem_sec / TAKT) - rp)
+            rows_d.append((l, cap, each + (1 if i < rest else 0), rp))
+        cap_sum = sum(x[1] for x in rows_d) or 1
+        name = eq_name(eq)
+        title = f"{name} 고장 생산계획 수정 보고서"
+        summary = (f"{name} 고장({round((b - a) / 60)}분)으로 {line}라인 생산이 멈춰 약 {loss}개 부족이 예상됩니다. "
+                   f"정상 가동 중인 {', '.join(others)}라인에 남은 생산능력 비율대로 {loss}개를 재배정하는 안을 제안합니다.")
+        actions = [f"{l}라인에 {aq}개 추가 배정 (남은 능력 비율 {c / cap_sum * 100:.1f}%)" for l, c, aq, _ in rows_d]
+        actions.append(f"{name} 복구 후 첫 제품 품질을 확인합니다.")
+        risks = [f"{name} 복구가 늦어지면 부족 수량이 늘어 다시 계산해야 합니다.", "본 보고서는 생산계획을 자동 변경하지 않습니다."]
+        content = dict(title=title, summary=summary, actions=actions, risks=risks, markdown=None, model="gemini-3.5-flash-lite",
+                       mock=False, fallbackReason=None, additionalRequest=None,
+                       requestInterpretation=dict(excludedLines=[], stoppedLines=[], priority="BALANCED", appliedRules=["잔여 생산능력 기준 적용"]),
+                       causeTrace=None, order=None)
+        doc = dict(documentNo=f"AI-RPT-{ymd}-__RID__", generatedAt=d(base + 60)[:16], targetLine=f"{line}라인", plan=TARGET, actual=done,
+                   shortage=loss, stopSec=int(b - a), factLine=f"{line}라인", factEquipment=name, factStart=d(a)[11:16],
+                   factCause="장비고장 · 설비 고장 신호", remainingSec=int(rem_sec), modelName="AI 분석 보고서", docStatus="전송 완료", author="생산관리팀장",
+                   allocationText=f"{line}라인 부족 {loss}개를 {', '.join(others)}라인에 남은 능력 비율대로 나눴습니다.",
+                   rows=[[f"{l}", fmt(rp), fmt(c), pct(c / cap_sum * 100), fmt(aq)] for l, c, aq, rp in rows_d],
+                   totalPlan=fmt(sum(x[3] for x in rows_d)), totalCapacity=fmt(cap_sum), totalAllocation=fmt(loss),
+                   resultGrade="목표 달성 가능", resultText=f"재배정 후 {line}라인 부족분을 오늘 안에 만들 수 있습니다. {summary}",
+                   actions=actions, risks=risks)
+        vals = ", ".join(f"('{l}', {c}, {aq}, {rp})" for l, c, aq, rp in rows_d)
+        out_lines.append(f"""
+WITH dd AS (SELECT downtime_id FROM downtime_event WHERE equipment_id = '{eq}' AND status = 'D' AND started_at = '{d(a)}' LIMIT 1),
+rr AS (INSERT INTO reassignment_report (downtime_id, loss_qty, created_at, approved, approved_by, approved_at, created_by, kind, base_at,
+                                        ct_sec, stopped_plan, stopped_done, target_qty, unmet_qty, ai_content)
+       SELECT dd.downtime_id, {loss}, '{d(base + 60)}', TRUE, {BOSS}, '{d(base + 900)}', {WRITER}, 'line', '{d(base)}',
+              {TAKT}, {TARGET}, {done}, {plan}, 0, {jtxt(content)} FROM dd RETURNING report_id, downtime_id),
+xx AS (INSERT INTO reassignment_detail (report_id, line_id, spare_capacity, added_qty, remaining_plan)
+       SELECT rr.report_id, v.l, v.c, v.a, v.p FROM rr, (VALUES {vals}) v(l, c, a, p))
+INSERT INTO reports (kind, target_key, title, status, campus_id, factory_id, content, replan_report_id,
+                     written_by, written_at, approved_by, approved_at, sent_by, sent_at)
+SELECT 'REPLAN', rr.downtime_id || '#' || rr.report_id, {q('계획수정 보고서 · ' + title)}, 'SENT', 'BODY', 1,
+       replace({jtxt(dict(doc=doc))}, '__RID__', lpad(rr.report_id::text, 3, '0')), rr.report_id,
+       {WRITER}, '{d(base + 600)}', {BOSS}, '{d(base + 900)}', {BOSS}, '{d(base + 1200)}' FROM rr;""")
+        reps.append((eq, a, b, n))
+
+    # 일일 생산 보고서 (19:30 작성 → 19:50 결재 → 20:00 전송)
+    procs = [("슬리팅", "SL"), ("프레스", "PR"), ("용접", "WD"), ("도장", "PT"), ("비전 검사", "VI")]
+    proc_rows = []
+    for nm, k in procs:
+        out = sum(1 for r in rows if r["kind"] == k and (k != "PR" or r["eq"].endswith("PR4") or r["result"] == "NG"))
+        ng = sum(1 for r in rows if r["kind"] == k and r["result"] == "NG")
+        proc_rows.append([nm, fmt(out), fmt(ng), pct(ng / out * 100 if out else 0)])
+    down_rows = [[eq_name(eq), "장비고장 · 설비 고장 신호", f"{d(a)[11:16]}~{d(b)[11:16]} ({round((b - a) / 60)}분)", f"AI-RPT-{ymd}-…"]
+                 for eq, a, b, _ in reps] or [["-", "비가동 없음", "-", "-"]]
+    rate = total_ok / plan * 100
+    worst = max(LINES, key=lambda l: ng_line[l])
+    doc = dict(
+        values=dict(DOC_NO=f"DAILY-{ymd}-D", DOC_AT=f"{day.isoformat()} 19:30", PROD_DATE=day.isoformat(), SHIFT="주간 08:00~19:00", STATUS="전송 완료",
+                    SUM_PLAN=f"{fmt(plan)}개", SUM_ACTUAL=f"{fmt(total_ok)}개", SUM_RATE=pct(rate), SUM_DEFECT=f"{fmt(total_ng)}개",
+                    SUMMARY_TEXT=f"{day.isoformat()} 생산계획 {fmt(plan)}개 대비 양품 {fmt(total_ok)}개를 생산하여 달성률 {pct(rate)}로 마감했습니다. 불량은 {fmt(total_ng)}개입니다.",
+                    TOTAL_0="합계", TOTAL_1=fmt(plan), TOTAL_2=fmt(total_ok), TOTAL_3=pct(rate), TOTAL_5=fmt(total_ng),
+                    M0=pct(oee), M1=pct(avail), M2=pct(perf), M3=pct(quality),
+                    AI_REVIEW=f"OEE {pct(oee)} (시간가동률 {pct(avail)} · 성능가동률 {pct(perf)} · 양품률 {pct(quality)}). "
+                              + (f"장비고장 {len(reps)}건으로 해당 라인 생산이 멈췄으나 재배정으로 목표 대비 {pct(rate)}를 달성했습니다." if reps else "비가동 없이 마감했습니다."),
+                    QUALITY=f"공정 불량 {fmt(sum(1 for r in rows if r['kind'] in ('PR', 'WD', 'PT') and r['result'] == 'NG'))}개 · 비전 불량 {fmt(sum(1 for r in vi if r['result'] == 'NG'))}개. 불량이 가장 많은 라인은 {worst}라인({ng_line[worst]}개)입니다."),
+        tables=dict(
+            LINES=[[l, fmt(TARGET), fmt(ok[l]), pct(ok[l] / TARGET * 100), pct(oee), fmt(ng_line[l])] for l in LINES],
+            PROC=proc_rows, DOWN=down_rows, WIP=[["슬리팅", "프레스", "0개"]],
+            HANDOVER=[[f"1. {eq_name(reps[-1][0])} 복구 후 첫 제품 품질 확인 결과 공유" if reps else "1. 특이사항 없음"],
+                      ["2. 다음 날 코일 입고 07:30 예정 (자재 확인)"]]),
+        fileName=f"일일생산보고서_{ymd}.doc")
+    out_lines.append(f"""
+INSERT INTO reports (kind, target_key, title, status, campus_id, factory_id, content, written_by, written_at, approved_by, approved_at, sent_by, sent_at)
+VALUES ('DAILY', '{day.isoformat()}', {q('일일 생산 보고서 · ' + day.isoformat())}, 'SENT', 'BODY', 1, {jtxt(doc)},
+        {WRITER}, '{day.isoformat()} 19:30:00', {BOSS}, '{day.isoformat()} 19:50:00', {BOSS}, '{day.isoformat()} 20:00:00')
+ON CONFLICT (kind, target_key) DO NOTHING;""")
+if NOW_MODE:
+    hh = [int(x) for x in args.now.split(":")] + [0, 0]
+    T0 = hh[0] * 3600 + hh[1] * 60 + hh[2]
+    PIPE = 200                                     # 슬리팅 투입부터 검사 끝까지 대략 (초)
+    # 오늘 가동 시작: 지금보다 --today-hours 전 (자정을 넘기면 어제 밤부터 — 오늘 화면에는 00:00 뒤만 오늘로 보여요)
+    TODAY_OPEN = int(T0 - args.today_hours * 3600)
+    TODAY_LINES = [l for l in args.today_lines.upper() if l in LINES]
+    STOPPED_LINES = [l for l in LINES if l not in TODAY_LINES]
+if SHIFT_MODE:
+    # 느린 공장: 공정 처리 시간을 박자에 맞게 늘려요 (설비가 놀지 않게). 점심 없음, 하루 고장 1~2건
+    s0, s1 = [sum(int(x) * m for x, m in zip(t.split(":"), (3600, 60))) for t in args.shift.split("-")]
+    k = args.shift_takt / 17.0
+    CT = dict(SL=round(args.shift_takt * 0.96), PR=round(args.shift_takt * 0.97), WD=round(args.shift_takt * 0.97), PT=round(4 * k), VI=round(2 * k))
+    TAKT = args.shift_takt
+    PIPE = CT["SL"] + 4 * CT["PR"] + CT["WD"] + CT["PT"] + CT["VI"] + 60
+    OPEN, CLOSE, LUNCH = s0, s1 - PIPE, (-10**7, -10**7)
+    TARGET = args.target // len(TODAY_LINES)
+    BREAKS_PER_DAY = (1, 2)
+    out_lines.append(f"""-- 하루 근무 시연 (--shift {args.shift}): 공정 표준 CT를 느린 공장에 맞춰요 (성능가동률·재배정 계산이 같은 기준)
+UPDATE process SET cycle_time_sec = {CT['SL']} WHERE process_id = 'SLITTING';
+UPDATE process SET cycle_time_sec = {CT['PR']} WHERE process_id = 'PRESS';
+UPDATE process SET cycle_time_sec = {CT['WD']} WHERE process_id = 'WELDING';
+UPDATE process SET cycle_time_sec = {CT['PT']} WHERE process_id = 'PAINTING';
+UPDATE process SET cycle_time_sec = {CT['VI']} WHERE process_id = 'INSPECTION';""")
+
+def write_shift_csv(full, outdir, base, dstr):
+    """오늘 하루 시뮬레이션 → 재생기 CSV (*_shift.csv). 시각은 근무 시작(base) 뒤 초"""
+    import csv as _csv
+    os.makedirs(outdir, exist_ok=True)
+    off = lambda sec: round(sec - base, 1)
+    rowno = {}
+    def nxt(eq):
+        rowno[eq] = rowno.get(eq, 0) + 1
+        return rowno[eq]
+    files = {
+        "slitting": ["planned_offset_sec", "planned_start_sec", "equipment_id", "row_no", "product_id", "scenario_note"],
+        "press": ["planned_offset_sec", "planned_start_sec", "equipment_id", "row_no", "product_id", *PRESS_COLS, "scenario_note"],
+        "welding": ["planned_offset_sec", "planned_start_sec", "equipment_id", "row_no", "product_id", *TH["weld"], "scenario_note"],
+        "painting": ["planned_offset_sec", "planned_start_sec", "equipment_id", "row_no", "product_id", "line_id", *TH["paint"], "scenario_note"],
+        "inspection": ["planned_offset_sec", "planned_start_sec", "equipment_id", "product_id", "line_id", "paint_equipment_id", "result", "scenario_note"],
+    }
+    out = {k: [] for k in files}
+    kind_of = {"SL": "slitting", "PR": "press", "WD": "welding", "PT": "painting", "VI": "inspection"}
+    for r in sorted(full, key=lambda r: (r["t"], r["eq"])):
+        kind = kind_of[r["kind"]]
+        note = "★ 불량" if r["result"] == "NG" else ""
+        row = {"planned_offset_sec": off(r["t"]), "planned_start_sec": off(r["s"]), "equipment_id": r["eq"], "product_id": r["pid"], "scenario_note": note}
+        if kind == "inspection":
+            row.update(line_id=r["line"], paint_equipment_id=r["paint"], result=r["result"])
+        else:
+            row["row_no"] = nxt(r["eq"])
+            row.update({c: v for c, v in r["vals"].items()})
+            if kind == "painting":
+                row["line_id"] = r["line"]
+        out[kind].append(row)
+    for kind, cols in files.items():
+        with open(os.path.join(outdir, f"{kind}_shift.csv"), "w", encoding="utf-8-sig", newline="") as f:
+            w = _csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
+            w.writeheader()
+            w.writerows(out[kind])
+    return {k: len(v) for k, v in out.items()}
+
+ALL_LINES, DAY_OPEN, DAY_LUNCH = LINES, OPEN, LUNCH
+for day, morning_only in [(x, False) for x in DAYS] + ([(BASE, True)] if MORNING or NOW_MODE else []):
+    if morning_only and SHIFT_MODE:
+        random.seed(int(BASE.strftime("%Y%m%d")) + 11)
+        LINES = ALL_LINES
+        # 오늘은 불량을 평소의 --today-ng 배로 (출고 화면 라인별 불량·불량률이 쌓여 보이게, 11/21)
+        saved_p = (P_PRESS_STAGE, P_WELD, P_PAINT, P_VISION)
+        P_PRESS_STAGE, P_WELD, P_PAINT, P_VISION = (x * args.today_ng for x in saved_p)
+        full, breaks, sl = simulate(day, close=CLOSE, n_breaks=(0, 0))
+        P_PRESS_STAGE, P_WELD, P_PAINT, P_VISION = saved_p
+        csv_counts = write_shift_csv(full, args.csv_out, OPEN, day.strftime("%Y%m%d"))
+        run_rows = [r for r in full if r["line"] in TODAY_LINES]
+        rows = [r for r in run_rows if r["t"] <= T0]                       # 준비 때 DB에 넣을 끝난 기록
+        open_rows = [r for r in run_rows if r["s"] < T0 < r["t"]]           # 준비 시각에 처리 중 (끝은 재생이 보냄)
+        clipped = [dict(r, t=T0, rel=T0, blk=None) for r in open_rows]
+        tl = timeline(rows + clipped, breaks)
+        for eq in [e for e in EQS if e[0] in STOPPED_LINES and "-" in e]:
+            tl[eq] = [(S, OPEN, None)]
+        n_all = len({r["pid"] for r in full if r["kind"] == "SL"})
+    elif morning_only and NOW_MODE:
+        # 오늘 중간부터: TODAY_OPEN ~ T0, 점심·고장 없음, 가동 라인만. T0를 넘겨 끝나는 제품은 뺌 (재생이 이어서 흘림)
+        OPEN, LUNCH, LINES = TODAY_OPEN, (-10**7, -10**7), TODAY_LINES
+        want = args.today_total if args.per_line is None else args.per_line * len(TODAY_LINES)
+        # 불량을 평소의 --today-ng 배로 (불량률 화면에 쌓여 보이게)
+        saved_p = (P_PRESS_STAGE, P_WELD, P_PAINT, P_VISION)
+        P_PRESS_STAGE, P_WELD, P_PAINT, P_VISION = (x * args.today_ng for x in saved_p)
+        # 라인 박자를 맞춰 "지금까지 만든 수"가 want에 가깝게 (고장으로 멈춘 만큼 덜 만듦). 같은 씨앗으로 몇 번 다시 계산
+        takt0, TAKT_TODAY = TAKT, max(17.0, (T0 - PIPE - TODAY_OPEN) * len(TODAY_LINES) * 0.8 / max(1, want))
+        seed = int(BASE.strftime("%Y%m%d")) + 7
+        for _ in range(6):
+            TAKT = TAKT_TODAY
+            random.seed(seed)
+            rows, breaks, sl = simulate(day, close=T0 - PIPE, hard_end=T0, pid_offset=MORNING_PID_OFFSET,
+                                        n_breaks=(args.today_breaks, args.today_breaks))
+            made = len({x["pid"] for x in rows if x["kind"] == "SL"})
+            if made == 0 or abs(made - want) <= want * 0.03:
+                break
+            TAKT_TODAY = max(17.0, TAKT_TODAY * made / want)
+        TAKT = takt0
+        P_PRESS_STAGE, P_WELD, P_PAINT, P_VISION = saved_p
+        LINES = ALL_LINES
+        tl = timeline(rows, breaks)
+        # 쉬는 라인: 오늘 시작부터 계획정지(S) 진행 중 (재생 뒤 추가 주문 결재로 가동)
+        for eq in [e for e in EQS if e[0] in STOPPED_LINES and "-" in e]:
+            tl[eq] = [(S, TODAY_OPEN, None)]
+    elif morning_only:
         rows, breaks, sl = simulate(day, close=MORNING_INPUT_END, hard_end=LUNCH[0], pid_offset=MORNING_PID_OFFSET, n_breaks=MORNING_BREAKS)
+        tl = timeline(rows, breaks, lunch_from_last=True)
     else:
-        rows, breaks, sl = simulate(day)
-    tl = timeline(rows, breaks, lunch_from_last=morning_only)
+        OPEN, LUNCH = DAY_OPEN, DAY_LUNCH
+        if SHIFT_MODE:   # 지난 날도 같은 근무·속도로, 가동 라인만 (쉬는 라인은 하루 종일 계획정지). 18:00 넘겨 끝나는 제품은 뺌
+            LINES = TODAY_LINES
+            rows, breaks, sl = simulate(day, hard_end=s1, n_breaks=(1, 2))
+        else:
+            rows, breaks, sl = simulate(day)
+        LINES = ALL_LINES
+        tl = timeline(rows, breaks)
+        if SHIFT_MODE:
+            last = int(math.ceil(max(r["rel"] for r in rows))) + 1
+            for eq in [e for e in EQS if e[0] in STOPPED_LINES and "-" in e]:
+                tl[eq] = [(S, OPEN, last)]
     d = lambda sec: ts(day, sec)
     out_lines.append(f"\n-- ===== {day.isoformat()}{' 오전 (08:00~12:00 + 점심)' if morning_only else ''} =====")
-    if morning_only:
+    if morning_only and NOW_MODE:
+        each, rest = divmod(args.target, len(TODAY_LINES))
+        qty = {l: (each + (1 if i < rest else 0)) for i, l in enumerate(TODAY_LINES)}
+        out_lines.append("INSERT INTO production_target (target_date, line_id, target_qty, created_at, created_by) VALUES\n"
+                         + ",\n".join(f"    ('{day.isoformat()}', '{l}', {qty.get(l, 0)}, '{day.isoformat()} 07:00:00', "
+                                       f"(SELECT user_id FROM users WHERE role = 'PLANT_HEAD' ORDER BY user_id LIMIT 1))" for l in LINES)
+                         + "\nON CONFLICT (target_date, line_id) DO UPDATE SET target_qty = EXCLUDED.target_qty, created_at = EXCLUDED.created_at, created_by = EXCLUDED.created_by;")
+    elif morning_only:
         # 오늘 목표는 공장장이 이미 정했으면 그대로 둬요
         out_lines.append("INSERT INTO production_target (target_date, line_id, target_qty, created_at) VALUES\n"
                          + ",\n".join(f"    ('{day.isoformat()}', '{l}', {TARGET}, '{(day - timedelta(days=1)).isoformat()} 17:00:00')" for l in LINES)
                          + "\nON CONFLICT (target_date, line_id) DO NOTHING;")
     else:
         copy("production_target", ["target_date", "line_id", "target_qty", "created_at"],
-             [(day.isoformat(), l, TARGET, f"{(day - timedelta(days=1)).isoformat()} 17:00:00") for l in LINES])
+             [(day.isoformat(), l, TARGET if not SHIFT_MODE or l in TODAY_LINES else 0,
+               f"{(day - timedelta(days=1)).isoformat()} 17:00:00") for l in LINES])
     kept = {x["pid"] for x in rows if x["kind"] == "SL"}
     morning = sum(1 for r in sl if r["s"] < LUNCH[0] and r["pid"] in kept)
     n_sl = len(kept)
     rolls = n_sl // 20
     r1 = min(rolls, -(-morning // 20))
+    if SHIFT_MODE and morning_only:
+        rolls, r1 = -(-n_all // 20) + 2, 0
     copy("coil_receipt", ["material_id", "received_at", "product_qty"],
          [(f"COIL-{day.strftime('%Y%m%d')}-{i + (500 if morning_only else 0):03d}",   # 오전 더미 코일은 501번부터 (리허설 입고 001~과 안 겹치게)
-           f"{day.isoformat()} {'07:30:00' if i <= r1 else '12:30:00'}", 20)
+           (ts(day, OPEN - 1800) if SHIFT_MODE and morning_only else ts(day, TODAY_OPEN - 600) if NOW_MODE and morning_only else f"{day.isoformat()} {'07:30:00' if i <= r1 else '12:30:00'}"), 20)
           for i in range(1, rolls + 1)])
     srt = lambda kind: sorted((r for r in rows if r["kind"] == kind), key=lambda r: (r["t"], r["eq"]))
-    copy("slitting_data", ["product_id", "equipment_id", "measured_at", "result"],
-         [(r["pid"], r["eq"], d(r["t"]), "OK") for r in srt("SL")])
+    copy("slitting_data", ["product_id", "equipment_id", "measured_at", "torque", "current", "voltage", "result"],
+         [(r["pid"], r["eq"], d(r["t"]), *sl_vals(r["eq"], r["pid"]), "OK") for r in srt("SL")])
     press = {}
     for r in srt("PR"):
         x = press.setdefault(r["pid"], dict(t0=r["t"], vals={}, result="OK"))
@@ -396,6 +721,9 @@ for day, morning_only in [(x, False) for x in DAYS] + ([(BASE, True)] if MORNING
          [("VI", r["pid"], r["line"], r["paint"], r["result"], d(r["t"]), d(r["t"] + 1) if r["result"] == "OK" else None) for r in srt("VI")])
     copy("product_flow", ["product_id", "equipment_id", "line_id", "started_at", "ended_at"],
          [(r["pid"], r["eq"], r["line"], d(r["s"]), d(r["t"])) for r in sorted(rows, key=lambda r: (r["s"], r["eq"]))])
+    if SHIFT_MODE and morning_only and open_rows:
+        copy("product_flow", ["product_id", "equipment_id", "line_id", "started_at", "ended_at"],
+             [(r["pid"], r["eq"], r["line"], d(r["s"]), None) for r in sorted(open_rows, key=lambda r: (r["s"], r["eq"]))])
     # 알람: 기준 밖 값 → 발생, 같은 설비의 다음 정상 값에서 해제
     alarms = []
     by_eq = {}
@@ -418,7 +746,7 @@ for day, morning_only in [(x, False) for x in DAYS] + ([(BASE, True)] if MORNING
     for eq, segs in tl.items():
         for code, a, b in segs:
             status = {R: "R", SHORT: "I", BLOCK: "I", D: "D", S: "S"}[code]
-            st.append((eq, status, d(a), d(b)))
+            st.append((eq, status, d(a), d(b) if b is not None else None))
             if code == R:
                 continue
             grp = None
@@ -430,15 +758,25 @@ for day, morning_only in [(x, False) for x in DAYS] + ([(BASE, True)] if MORNING
             cd, detail, mm, at = {
                 SHORT: ("UP_SHORTAGE", "앞 공정에서 넘어온 제품 없음", None, None),
                 BLOCK: ("UP_BLOCKED", "뒤 설비가 제품을 받지 못해 대기", None, None),
-                D: ("UP_BREAKDOWN", "설비 고장 신호", memo.get(eq), d(b)),
+                D: ("UP_BREAKDOWN", "설비 고장 신호", memo.get(eq), d(b) if b is not None else None),
                 S: ("PL_SHIFT", "점심시간", None, None)}[code]
-            dt.append((eq, status, cd, detail, d(a), d(b), mm, at, grp))
+            if b is None:   # 오늘 중간부터: 쉬는 라인 계획정지 진행 중
+                detail = "계획정지 (오늘 가동하지 않는 라인, 추가 주문 시 가동)"
+            elif code == S and SHIFT_MODE:   # 하루 근무 시연: 점심 없음 → 하루 종일 쉬는 라인
+                detail = "계획정지 (가동하지 않는 라인)"
+            dt.append((eq, status, cd, detail, d(a), d(b) if b is not None else None, mm, at, grp))
     copy("downtime_event", ["equipment_id", "status", "code", "detail", "started_at", "ended_at", "action_memo", "action_at", "stop_group_id"],
          sorted(dt, key=lambda x: (x[4], x[0])))
     copy("equipment_status_history", ["equipment_id", "status", "started_at", "ended_at"], sorted(st, key=lambda x: (x[2], x[0])))
 
     vi = [r for r in rows if r["kind"] == "VI"]
-    summary.append(dict(day=day.isoformat() + (" 오전" if morning_only else ""), input=n_sl, coils=rolls,
+    if not morning_only:
+        if SHIFT_MODE:
+            LINES = TODAY_LINES
+        past_reports(day, rows, breaks, tl, vi, alarms)
+        LINES = ALL_LINES
+    summary.append(dict(day=day.isoformat() + ((f" {args.shift} 중 ~{args.now} (재생 CSV {csv_counts})" if SHIFT_MODE
+                                                 else f" {ts(day, TODAY_OPEN)[11:19]}~{args.now}" if NOW_MODE else " 오전") if morning_only else ""), input=n_sl, coils=rolls,
                         shipped={l: sum(1 for r in vi if r["line"] == l and r["result"] == "OK") for l in LINES},
                         process_ng=sum(1 for r in rows if r["kind"] in ("PR", "WD", "PT") and r["result"] == "NG"),
                         vision_ng=sum(1 for r in vi if r["result"] == "NG"),

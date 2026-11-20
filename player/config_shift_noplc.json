@@ -1,0 +1,53 @@
+{
+  "broker": {
+    "host": "localhost",
+    "port": 1883,
+    "username": "",
+    "password": ""
+  },
+  "topics": {
+    "raw": "sfaas/raw",
+    "hb": "sfaas/hb",
+    "ctl": "sfaas/ctl"
+  },
+  "csv_dir": "../scenario_shift",
+  "csv_suffix": "shift",
+  "duration_sec": 32400,
+  "value_naming": "camel",
+  "product_date": "today",
+  "faults": [
+    {
+      "equipment": "C-PR3",
+      "on": 9000,
+      "pause": true
+    }
+  ],
+  "slitting": {
+    "enabled": true,
+    "disabled": [],
+    "values": "dummy"
+  },
+  "heartbeat": {
+    "enabled": true,
+    "interval_sec": 1,
+    "disabled": []
+  },
+  "coil": {
+    "enabled": false,
+    "product_qty": 20,
+    "schedule": [
+      {
+        "at_sec": 0,
+        "rolls": 12
+      }
+    ]
+  },
+  "hold_lines": [
+    "E",
+    "F"
+  ],
+  "warm_start_sec": 0,
+  "shift_start": "09:00",
+  "start_from_sec": 7200,
+  "_설명": "하루 근무 시연 (11/21): 근무 09:00~18:00, 재생은 11:00(7200초)부터. 그 앞은 make_history.py --shift 로 DB에 넣어 둠. 11:30 C-PR3 고장 (복구 없음 → 트러블 슈팅 보고서로 대응). E·F는 추가 주문 결재로 가동. 배속은 --speed (도중에 speed 명령)"
+}

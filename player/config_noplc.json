@@ -24,7 +24,8 @@
   ],
   "slitting": {
     "enabled": true,
-    "disabled": []
+    "disabled": [],
+    "values": "dummy"
   },
   "heartbeat": {
     "enabled": true,

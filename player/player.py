@@ -20,10 +20,12 @@ import csv
 import json
 import os
 import queue
+import random
 import re
 import sys
 import threading
 import time
+import zlib
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -43,6 +45,9 @@ VALUE_COLS = {
     "welding": ["press_force", "current", "voltage", "weld_time"],
     "painting": ["ph", "temperature", "current", "voltage"],
 }
+# 🆕 11/21 슬리팅 더미 값 (slitting.values = "dummy"): 항목 → [가운데 값, 흔들림 폭]. ⚠️ 가짜 시연 값 (실측 아님)
+#   같은 제품 번호면 늘 같은 값 (다시 재생해도 같은 그래프). 설비마다 가운데 값이 조금씩 달라요
+SLITTING_DUMMY = {"torque": [12.0, 0.6], "current": [3.5, 0.2], "voltage": [220.0, 2.5]}
 LINES = list("ABCDEF")
 LINE_STAGES = ["SL", "PR1", "PR2", "PR3", "PR4", "WD"]   # 라인 안 공정 순서
 # 설비 39대 (라인 A~F × 슬리팅·프레스 4·용접) + 도장 2 + 검사 1
@@ -82,6 +87,14 @@ def load_config(path):
     cfg.setdefault("slitting", {})
     cfg["slitting"].setdefault("enabled", True)
     cfg["slitting"].setdefault("disabled", [])
+    # 🆕 11/21 슬리팅 측정값: "plc" = 값 없이 보내고 Node-RED가 실제 인버터(A-SL) 값으로 채움 (기본, 예전 그대로)
+    #                         "dummy" = 이 프로그램이 토크·전류·전압 더미 값을 넣음 (시연 영상용, 인버터 없이)
+    cfg["slitting"].setdefault("values", "plc")
+    cfg["slitting"].setdefault("dummy", {})
+    for k, v in SLITTING_DUMMY.items():
+        cfg["slitting"]["dummy"].setdefault(k, v)
+    if cfg["slitting"]["values"] not in ("plc", "dummy"):
+        sys.exit("[설정 오류] slitting.values는 \"plc\" 또는 \"dummy\"이어야 해요.")
     cfg.setdefault("heartbeat", {})
     cfg["heartbeat"].setdefault("enabled", True)
     cfg["heartbeat"].setdefault("interval_sec", 1)
@@ -90,6 +103,12 @@ def load_config(path):
     cfg["coil"].setdefault("enabled", True)
     cfg["coil"].setdefault("product_qty", 20)
     cfg["coil"].setdefault("schedule", [{"at_sec": 0, "rolls": 4}])
+    # 🆕 11/21 이어서 시작: 시나리오 앞 N초를 시작하자마자 한 번에 보내요 → 재생 시작 순간 모든 공정에 제품이 걸려 있어 바로 가동(R)
+    #   (오늘 중간부터 채운 기록 make_history.py --now 뒤에 이어서 돌릴 때. 멈춰 둔 라인·코일 입고는 그대로)
+    cfg.setdefault("warm_start_sec", 0)
+    # 🆕 11/21 하루 근무 재생: shift_start = CSV 0초의 가상 시각("09:00"), start_from_sec = 여기서부터 재생 (그 앞은 DB에 미리 넣어 둠)
+    cfg.setdefault("shift_start", None)
+    cfg.setdefault("start_from_sec", 0)
     cfg.setdefault("hold_lines", [])   # 🆕 11/20 처음에 멈춰 둘 라인 (추가 주문으로 나중에 가동, --hold 와 같음)
     # 🆕 11/20 도장 경로 전환 기다리기: {"paint": "PT2", "lines": ["A","B","C"], "at": 150}
     #   at초부터 그 라인들의 PT2·검사 값을 붙잡아 두고, 경로 전환 명령({ctl}/route 또는 키보드 "route A PT2")을 받으면 그때부터 보내요
@@ -114,8 +133,15 @@ def num(s):
     return round(float(s), 6)
 
 
+# 🆕 11/21 시연용 가상 시계: shift_start(예: 09:00)가 있으면 메시지 시각 = 오늘 근무 시작 + 재생 시각(초)
+#   백엔드(sim_clock)·화면과 같은 시계라서 실제로는 밤이어도 09:00~18:00 근무로 흘러요. 배속(--speed)만큼 빨리
+VCLOCK = {"base": None, "offset": None}
+
+
 def now_ts():
-    """실제로 보낸 시각 (ISO-8601 한국 시간, 밀리초까지)"""
+    """보낸 시각 (ISO-8601 한국 시간, 밀리초까지). 가상 시계면 근무 시작 + 재생 시각"""
+    if VCLOCK["base"] is not None and VCLOCK["offset"] is not None:
+        return (VCLOCK["base"] + timedelta(seconds=VCLOCK["offset"]())).isoformat(timespec="milliseconds")
     return datetime.now(KST).isoformat(timespec="milliseconds")
 
 
@@ -124,6 +150,7 @@ def now_ts():
 #  각 함수는 (토픽, 내용 dict, QoS)를 돌려줘요.
 # =====================================================================
 TOPICS = {"raw": "sfaas/raw", "hb": "sfaas/hb"}   # 시작할 때 config.json 값으로 바뀜
+SLITTING_MODE = {"values": "plc", "dummy": SLITTING_DUMMY}   # 시작할 때 config.json slitting 값으로 바뀜
 def msg_values(eq, values, line_id=None, product_id=None, event="end"):
     """Q-01 측정값 (슬리팅·프레스·용접·도장)
     v0.3.9: event = "start"(제품이 설비에 들어감, 값 없음) / "end"(값을 쓰고 내보냄). ts = 그 순간"""
@@ -256,7 +283,7 @@ def load_events(cfg, auto_faults):
             if t is None:
                 continue
             events.append(dict(t=float(t), kind="fault", eq=f["equipment"], key="AUTO_FAULT",
-                               data=dict(fault=val), star=False, note=""))
+                               data=dict(fault=val, pause=bool(f.get("pause"))), star=False, note=""))
 
     # 시각 순서로 정렬 (같은 시각이면 고장 전환 → 코일 → 측정값 순)
     order = {"fault": 0, "coil": 1}
@@ -265,10 +292,25 @@ def load_events(cfg, auto_faults):
     return events
 
 
+def slitting_dummy(eq, product_id, spec):
+    """슬리팅 더미 측정값 (slitting.values = "dummy"). 제품 번호로 씨앗을 정해 다시 재생해도 같은 값이에요.
+    설비마다 가운데 값을 조금 옮기고(라인 A→F), 제품마다 흔들림 폭 안에서 정규분포처럼 흔들어요"""
+    rnd = random.Random(zlib.crc32(f"{eq}|{product_id}".encode()))
+    shift = (LINES.index(eq[0]) - 2.5) / 2.5 if eq[0] in LINES else 0.0   # -1 ~ +1
+    out = {}
+    for item, (center, spread) in spec.items():
+        v = center + shift * spread * 0.5 + rnd.gauss(0, spread / 2)
+        v = max(center - spread * 2, min(center + spread * 2, v))   # 너무 튀지 않게
+        out[item] = round(v, 2)
+    return out
+
+
 def build_message(e):
     """이벤트 → (토픽, 내용, QoS). 보내는 순간에 만들어서 ts가 실제 보낸 시각이 돼요."""
     d = e["data"]
     ev = "start" if d.get("start") else "end"
+    if e["kind"] == "slitting" and ev == "end" and SLITTING_MODE["values"] == "dummy" and not d["values"]:
+        d = dict(d, values=slitting_dummy(e["eq"], d.get("product_id") or "", SLITTING_MODE["dummy"]))
     if e["kind"] == "inspection":
         return msg_vision(d["product_id"], d["line_id"], d["paint_id"], d["vision_pass"], ev)
     if e["kind"] == "coil":
@@ -316,6 +358,7 @@ class Sender:
         if self.dry or not self.client:
             return
         topic = f"{TOPICS['ctl']}/line"
+        clock_topic = f"{TOPICS['ctl']}/clock"   # 🆕 11/21 배속 바꾸기 {"speed": 10} (시연 스크립트가 보냄)
         route_topic = f"{TOPICS['ctl']}/route"   # 🆕 11/20 도장 경로 전환 (AI 보고서 결재 → 백엔드가 보냄)
 
         def on_message(_client, _userdata, msg):
@@ -326,6 +369,10 @@ class Sender:
                 paint = str(body.get("paintId", "")).upper()
             except Exception:
                 say(f"{YEL}명령을 읽지 못했어요: {msg.payload[:80]!r}{RST}")
+                return
+            if msg.topic == clock_topic:
+                if body.get("speed"):
+                    cmd_q.put(f"speed {body['speed']}")
                 return
             if msg.topic == route_topic:
                 if line in LINES and paint:
@@ -340,6 +387,7 @@ class Sender:
         self.client.on_message = on_message
         self.client.subscribe(topic, qos=1)
         self.client.subscribe(route_topic, qos=1)
+        self.client.subscribe(clock_topic, qos=1)
         say(f"{CYN}라인 가동 명령 받기: {topic} · 도장 경로 전환 받기: {route_topic}{RST}")
 
     @staticmethod
@@ -388,6 +436,12 @@ def main():
     ap.add_argument("--config", default=str(HERE / "config.json"), help="설정 파일 (기본: config.json)")
     ap.add_argument("--dry-run", action="store_true", help="MQTT로 보내지 않고 화면에만 출력")
     ap.add_argument("--speed", type=float, default=1.0, help="재생 속도 배율 (예: 2 → 2배 빠르게)")
+    ap.add_argument("--warm", type=float, default=None, metavar="초",
+                    help="이어서 시작: 시나리오 앞 N초를 시작하자마자 보내 모든 공정이 바로 가동 (설정 warm_start_sec보다 우선)")
+    ap.add_argument("--from", dest="start_from", type=float, default=None, metavar="초",
+                    help="이 재생 시각(근무 시작 뒤 초)부터 재생 (그 앞 기록은 DB에 미리 넣어 둠). 설정 start_from_sec보다 우선")
+    ap.add_argument("--real-start", type=float, default=None, metavar="epoch",
+                    help="이 실제 시각(유닉스 초)에 시작 (백엔드 가상 시계와 딱 맞추려고)")
     ap.add_argument("--manual", action="store_true", help="자동 고장 일정을 끄고 키보드로만 고장·복구")
     ap.add_argument("--quiet", action="store_true", help="--dry-run 때 메시지 한 줄씩 출력하지 않기")
     ap.add_argument("--hold", nargs="*", default=None, metavar="라인",
@@ -398,10 +452,17 @@ def main():
 
     cfg = load_config(args.config)
     TOPICS.update(cfg["topics"])
+    SLITTING_MODE.update(values=cfg["slitting"]["values"], dummy=cfg["slitting"]["dummy"])
     auto_faults = [] if args.manual else cfg["faults"]
     events = load_events(cfg, auto_faults)
     duration = float(cfg["duration_sec"])
 
+    held0 = [l.upper() for l in (args.hold if args.hold is not None else cfg["hold_lines"])]
+    start_from = float(args.start_from if args.start_from is not None else cfg["start_from_sec"])
+    if start_from > 0:
+        # 그 앞은 DB에 미리 넣어 둔 기록 → 보내지 않아요. 멈춰 둔 라인은 가동할 때 처음부터 보내야 해서 남겨요
+        events = [e for e in events if e["t"] >= start_from
+                  or (e["key"] not in ("AUTO_FAULT", "COIL") and key_line(e["key"]) in held0)]
     # 스트림별 줄 (수동 고장 때 그 설비와 뒤 공정만 멈췄다가 이어서 보내려고 나눠 둬요)
     streams = {}
     for e in events:
@@ -410,6 +471,10 @@ def main():
     pause_causes = {}                      # 스트림 → 멈추게 한 수동 고장 설비들
     pause_start = {}                       # 스트림 → 멈춘 시작 시각
     faulted = set()                        # 지금 고장 중인 설비
+    # 🆕 11/21 고장 뒤 공정: 통째로 멈추지 않고 "고장 설비를 이미 지난 제품"은 끝까지 처리 → 다음 제품이 안 오면 대기(I)
+    gates = {}                             # 뒤 공정 스트림 → 막고 있는 고장 설비들
+    gate_start = {}                        # 뒤 공정 스트림 → 다음 제품을 기다리기 시작한 재생 시각
+    passed = {}                            # 설비 → 그 설비 처리를 끝낸(end 보낸) 제품 번호들
     disconnected = set()                   # 통신 끊김 흉내 중인 설비
     # 🆕 11/20 멈춰 둔 라인: 그 라인의 슬리팅~검사 스트림을 0초부터 멈춰 두고, start 명령을 받은 때부터 처음 줄부터 보내요
     held = [l.upper() for l in (args.hold if args.hold is not None else cfg["hold_lines"])]
@@ -421,6 +486,13 @@ def main():
             if k != "AUTO_FAULT" and k != "COIL" and key_line(k) == line:
                 pause_causes.setdefault(k, set()).add("HOLD:" + line)
                 pause_start.setdefault(k, 0.0)
+    # 🆕 11/21 이어서 시작: 멈춰 둔 라인·코일을 뺀 스트림을 warm초 앞당겨요 → 그 앞 메시지는 시작하자마자 한꺼번에 나가요
+    warm = float(args.warm if args.warm is not None else cfg["warm_start_sec"])
+    if warm > 0:
+        for k in streams:
+            if k != "COIL" and not pause_causes.get(k):
+                shift[k] -= warm
+        duration = max(0.0, duration - warm)   # 데이터가 끝나는 때 재생도 끝
     dropped = 0                            # 통신 끊김으로 안 보낸 메시지 수
     route_hold = cfg["route_hold"]         # 🆕 11/20 도장 경로 전환 기다리기 (at초가 되면 붙잡기 시작)
     route_armed = bool(route_hold)
@@ -433,6 +505,8 @@ def main():
     hb_eqs = [eq for eq in ALL_EQS if eq not in hb_off] if hb_cfg["enabled"] else []
     hb_interval = float(hb_cfg["interval_sec"])
     next_hb = 0.0 if hb_eqs else None      # 다음 상태 신호 시각 (0초부터)
+    if next_hb is not None:
+        next_hb = float(args.start_from if args.start_from is not None else cfg["start_from_sec"])
 
     counts = {k: 0 for k in KIND_NAMES}
     sender = Sender(cfg, args.dry_run)
@@ -444,6 +518,13 @@ def main():
         f"{' · 수동 모드' if args.manual else ' · 자동 고장 일정 ' + str(len(auto_faults)) + '건'}")
     say(f"토픽: {TOPICS['raw']}/{{설비ID}} (값) · {TOPICS['hb']}/{{설비ID}} (상태 신호) · "
         f"값 이름: {cfg['value_naming']}")
+    if warm > 0:
+        say(f"{CYN}이어서 시작: 시나리오 앞 {warm:g}초를 바로 보내요 → 모든 공정이 처음부터 가동 (재생 길이 {duration:g}초){RST}")
+    if cfg["slitting"]["enabled"]:
+        sl = cfg["slitting"]
+        say(f"슬리팅 측정값: " + ("더미 (토크·전류·전압, 시연용 가짜 값)" if sl["values"] == "dummy"
+                                 else "값 없이 보냄 → Node-RED가 실제 인버터(A-SL) 값으로 채움")
+            + (f" · 이 프로그램이 안 보내는 슬리팅: {', '.join(sl['disabled'])} (Node-RED가 보냄)" if sl["disabled"] else ""))
     if hb_eqs:
         say(f"상태 신호: {len(hb_eqs)}대 · {hb_interval:g}초마다 (고장 여부 fault 포함)"
             f"{' (끈 설비: ' + ', '.join(sorted(hb_off)) + ')' if hb_off else ''}")
@@ -459,10 +540,26 @@ def main():
     threading.Thread(target=keyboard_thread, args=(cmd_q,), daemon=True).start()
     sender.listen_line_commands(cmd_q)
 
+    if args.real_start:
+        wait = args.real_start - time.time()
+        if wait > 0:
+            time.sleep(wait)
     t0 = time.perf_counter()
+    clock = {"p0": t0, "off0": start_from, "speed": args.speed}
 
     def now_offset():
-        return (time.perf_counter() - t0) * args.speed
+        return clock["off0"] + (time.perf_counter() - clock["p0"]) * clock["speed"]
+
+    def set_speed(v):
+        """배속 바꾸기: 지금 재생 시각에서 새 배속으로 이어서"""
+        clock["off0"] = now_offset()
+        clock["p0"] = time.perf_counter()
+        clock["speed"] = v
+
+    if cfg["shift_start"]:
+        hh, mm = [int(x) for x in str(cfg["shift_start"]).split(":")[:2]]
+        VCLOCK["base"] = datetime.now(KST).replace(hour=hh, minute=mm, second=0, microsecond=0)
+        VCLOCK["offset"] = now_offset
 
     def send_heartbeats(off):
         n = 0
@@ -496,6 +593,15 @@ def main():
             extra += f"  {YEL}통신 끊김: {', '.join(sorted(disconnected))}{RST}"
         say(f"{DIM}[{off:6.1f}s] 보낸 개수: {parts}{RST}{extra}")
 
+    def prev_stage(k, e):
+        """스트림의 바로 앞 공정 설비 (C-PR4 → C-PR3, C-WD → C-PR4, PT1:C → C-WD, VI:C → 그 제품의 도장 설비)"""
+        if k.startswith("VI:"):
+            return e["data"].get("paint_id") or ""
+        if ":" in k:   # 도장
+            return f"{key_line(k)}-WD"
+        i = LINE_STAGES.index(k.split("-")[1])
+        return f"{k[0]}-{LINE_STAGES[i - 1]}" if i > 0 else ""
+
     def affected_streams(eq):
         """수동 고장 때 멈출 스트림: 그 설비 + 뒤 공정 (앞 공정은 계속)"""
         if eq == "VI":
@@ -504,9 +610,20 @@ def main():
             lines = {key_line(k) for k in streams if k.startswith(eq + ":")}
             return [k for k in streams if k.startswith(eq + ":") or (k.startswith("VI:") and key_line(k) in lines)]
         line, stage = eq[0], key_stage(eq)
-        return [k for k in streams if k != "AUTO_FAULT" and key_line(k) == line and key_stage(k) >= stage]
+        # 11/21: 코일 입고 줄(COIL)은 설비가 아니라서 빼요 (key_line("COIL") = "C"로 C라인 고장 때 멈추던 버그)
+        return [k for k in streams if k not in ("AUTO_FAULT", "COIL") and key_line(k) == line and key_stage(k) >= stage]
 
-    def handle_cmd(line):
+    def handle_cmd(line, how="수동"):
+        parts0 = line.strip().split()
+        if len(parts0) == 2 and parts0[0].lower() == "speed":
+            try:
+                v = float(parts0[1])
+            except ValueError:
+                v = 0
+            if v > 0:
+                set_speed(v)
+                say(f"{CYN}[{now_offset():8.1f}s] ⏩ 배속 ×{v:g}{RST}")
+            return True
         """키보드 명령 처리. False면 종료."""
         nonlocal dropped
         parts = line.split()
@@ -591,18 +708,22 @@ def main():
             if eq in faulted:
                 say(f"{YEL}{eq}는 이미 고장 상태예요.{RST}")
                 return True
-            set_fault(eq, 1, "수동")
+            set_fault(eq, 1, how)
             for k in affected_streams(eq):
-                if not pause_causes.get(k):
-                    pause_causes[k] = set()
-                    pause_start[k] = off
-                pause_causes[k].add(eq)
-            say(f"{YEL}  → {eq}와 뒤 공정의 값 전송을 멈춰요 (앞 공정은 계속).{RST}")
+                own = k == eq or k.startswith(eq + ":") or eq == "VI"
+                if own:   # 고장 설비 자신: 안에 든 제품도 복구 때까지 그대로
+                    if not pause_causes.get(k):
+                        pause_causes[k] = set()
+                        pause_start[k] = off
+                    pause_causes[k].add(eq)
+                else:     # 뒤 공정: 이미 지나간 제품은 끝까지, 그다음 제품부터 기다림 → 자기 일 끝나면 대기(I)
+                    gates.setdefault(k, set()).add(eq)
+            say(f"{YEL}  → {eq} 멈춤. 뒤 공정은 하던 제품을 끝내고 다음 제품을 기다려요 (앞 공정은 계속).{RST}")
         else:  # r
             if eq not in faulted:
                 say(f"{YEL}{eq}는 고장 상태가 아니에요.{RST}")
                 return True
-            set_fault(eq, 0, "수동")
+            set_fault(eq, 0, how)
             moved = 0.0
             for k in list(pause_causes):
                 pause_causes[k].discard(eq)
@@ -650,6 +771,18 @@ def main():
                 if causes and off >= duration and all(c.startswith(("HOLD:", "ROUTE:")) for c in causes):
                     continue  # 끝까지 가동하지 않은 라인은 기다리지 않아요
                 left = True
+                # 🆕 고장 뒤 공정: 맨 앞 제품이 고장 설비를 아직 못 지났으면 기다림 (지났으면 그대로 처리)
+                if gates.get(k):
+                    pid = dq[0]["data"].get("product_id")
+                    # 바로 앞 공정을 지났는지로 판단 (복구 뒤에도 PR3 → PR4 → 용접 → 도장 → 검사 순서가 지켜지게)
+                    if pid and pid not in passed.get(prev_stage(k, dq[0]), ()):
+                        if dq[0]["t"] + shift[k] <= off and k not in gate_start:
+                            gate_start[k] = off
+                        continue
+                    if all(g not in faulted for g in gates[k]):   # 복구 뒤 첫 제품이 지나옴 → 기다린 만큼 밀고 막기 끝
+                        if k in gate_start:
+                            shift[k] += max(0.0, off - gate_start.pop(k))
+                        del gates[k]
                 # 경로 전환 대기만 걸린 스트림: 대기 시작(at초) 전에 나갈 값은 그대로 보내요 (재생이 잠깐 밀려도 순서 유지)
                 if causes and not (route_hold and all(c.startswith("ROUTE:") for c in causes)
                                    and dq[0]["t"] + shift[k] < float(route_hold["at"])):
@@ -665,17 +798,22 @@ def main():
             do_hb = hb_due is not None and (best_t is None or hb_due < best_t)
             due = hb_due if do_hb else best_t
             if due is None or due > off:
-                wait = 0.05 if due is None else min(0.05, (due - off) / args.speed)
+                wait = 0.05 if due is None else min(0.05, (due - off) / clock["speed"])
                 time.sleep(max(wait, 0.001))
                 continue
             # 3) 보내기
             if do_hb:
                 send_heartbeats(off)
-                next_hb += hb_interval
+                next_hb += max(hb_interval, clock["speed"])   # 상태 신호는 실제 1초마다 (배속이 커도 메시지가 쏟아지지 않게)
                 continue
             e = streams[best_k].popleft()
             if e["kind"] == "fault":
-                set_fault(e["eq"], e["data"]["fault"], "자동")
+                if e["data"].get("pause"):
+                    # 🆕 11/21 "pause": true 고장 → 키보드 f/r과 같이 그 설비와 뒤 공정의 값 전송을 멈췄다가 복구 때 이어서 보내요
+                    #   (CSV를 고장에 맞춰 다시 만들지 않아도 뒤 공정이 실제로 멈춰요)
+                    handle_cmd(f"{'f' if e['data']['fault'] else 'r'} {e['eq']}", "자동")
+                else:
+                    set_fault(e["eq"], e["data"]["fault"], "자동")
                 continue
             if e["kind"] == "coil":
                 topic, text = sender.send(build_message(e))
@@ -690,6 +828,8 @@ def main():
                 continue
             topic, text = sender.send(build_message(e))
             counts["start" if e["data"].get("start") else e["kind"]] += 1
+            if not e["data"].get("start") and e["data"].get("product_id"):
+                passed.setdefault(e["eq"], set()).add(e["data"]["product_id"])   # 고장 뒤 공정 기다림 판단용
             if e["star"]:
                 say(f"{RED}[{off:6.1f}s] ★ 불량 줄 {e['eq']}  {topic} {text}\n"
                     f"           ({e['note']}){RST}")
@@ -705,7 +845,7 @@ def main():
 
     say("")
     say(f"{CYN}=== 재생 {'중단' if stopped_early else '완료'} 요약 ==={RST}  "
-        f"(실제 {elapsed:.1f}초 · 재생 시각 {elapsed * args.speed:.1f}초)")
+        f"(실제 {elapsed:.1f}초 · 재생 시각 {now_offset():.1f}초)")
     say("  " + " · ".join(f"{KIND_NAMES[k]} {counts[k]}" for k in KIND_NAMES))
     if faulted:
         say(f"  {YEL}⚠ 복구 신호를 보내지 않은 설비: {', '.join(sorted(faulted))}{RST}")
