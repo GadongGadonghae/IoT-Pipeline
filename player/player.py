@@ -47,7 +47,8 @@ VALUE_COLS = {
 }
 # 🆕 11/21 슬리팅 더미 값 (slitting.values = "dummy"): 항목 → [가운데 값, 흔들림 폭]. ⚠️ 가짜 시연 값 (실측 아님)
 #   같은 제품 번호면 늘 같은 값 (다시 재생해도 같은 그래프). 설비마다 가운데 값이 조금씩 달라요
-SLITTING_DUMMY = {"torque": [12.0, 0.6], "current": [3.5, 0.2], "voltage": [220.0, 2.5]}
+# 11/21 실측(LS SV-iG5A, 11/20 밤 A-SL) 근처로: 가동 중 전압 약 185 V · 전류 약 0.1 A, 토크는 인버터가 안 줘서 0
+SLITTING_DUMMY = {"torque": [0.0, 0.0], "current": [0.1, 0.02], "voltage": [185.0, 3.0]}
 LINES = list("ABCDEF")
 LINE_STAGES = ["SL", "PR1", "PR2", "PR3", "PR4", "WD"]   # 라인 안 공정 순서
 # 설비 39대 (라인 A~F × 슬리팅·프레스 4·용접) + 도장 2 + 검사 1
