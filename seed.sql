@@ -54,6 +54,7 @@ INSERT INTO downtime_code (code, code_name, is_planned, description) VALUES
     ('UP_BREAKDOWN', '장비고장',          FALSE, '설비 고장 신호'),
     ('UP_ALARM',     '알람(관리값 이탈)', FALSE, '관리값 상·하한 초과 (SCR-009 기준)'),
     ('UP_SHORTAGE',  '재공부족',          FALSE, '앞 공정 정지로 재료 없음'),
+    ('UP_BLOCKED',   '후공정 정지 대기',  FALSE, '프레스 1~3단이 끝낸 제품을 들고 뒤 단을 기다림 (v0.3.11)'),
     ('UP_DELAY',     '작업지연',          FALSE, '작업자 투입 지연'),
     ('UP_LABOR',     '노사협의',          FALSE, '노사협의로 인한 정지'),
     ('UP_SAFETY',    '안전문제',          FALSE, '비상정지 버튼'),

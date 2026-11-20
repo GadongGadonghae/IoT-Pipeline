@@ -17,3 +17,6 @@ player/query
 
 # 옛 버전 테스트 데이터 (v0.3.7, 지금 DB와 안 맞음)
 test_data.sql
+
+# 과거 기록 더미 SQL (make_history.py가 만듦, 수십 MB)
+history/

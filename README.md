@@ -118,13 +118,17 @@ CREATE DATABASE sfaas ENCODING 'UTF8' TEMPLATE template0;
 | `demo_user.sql` | 데모 로그인 계정 abc / 1234 |
 | `demo_reset.sql` | **기록만 비우기** (매번 재생 전에) |
 
-> 🆕 **11/19 DB v0.3.10 (AI 계획수정 보고서 저장):** 위 순서로 새로 만들면 이미 들어 있어요.
-> **11/19 전에 DB를 만들었다면** 아래 한 줄만 더 실행하세요 (기존 데이터는 그대로, 여러 번 실행해도 괜찮아요). 안 하면 백엔드가 `missing column [ai_content]`로 안 켜져요.
+> 🆕 **예전에 DB를 만들었다면** 위 순서 대신 아래만 더 실행하세요 (기존 데이터는 그대로, 여러 번 실행해도 괜찮아요). 새로 만들면 이미 들어 있어요.
 > ```
 > \c sfaas
 > \i C:/sfaas/IoT-Pipeline/alter_v0.3.10.sql
+> \i C:/sfaas/IoT-Pipeline/alter_v0.3.11.sql
+> \i C:/sfaas/IoT-Pipeline/alter_v0.3.14.sql
 > ```
-> 마지막에 `kind`, `remaining_plan` 두 줄이 나오면 성공 (중간의 "이미 있습니다" 안내는 정상)
+> - v0.3.10 (11/19, AI 계획수정 보고서 저장): 안 하면 백엔드가 `missing column [ai_content]`로 안 켜져요. 마지막에 `kind`, `remaining_plan` 두 줄
+> - v0.3.11 (11/20, 비가동 코드 `UP_BLOCKED` 후공정 정지 대기): 안 하면 프레스 단이 멈춘 뒤 판정 저장이 실패해요. 마지막에 `UP_BLOCKED` 한 줄
+> - v0.3.14 (11/20, AI 추가 주문 배정): 고장 건 없는 보고서(kind = order)를 저장하려고 `reassignment_report.downtime_id`를 비워 둘 수 있게. 안 하면 추가 주문 배정 저장이 실패해요
+> - 중간의 "이미 있습니다" 안내는 정상
 
 ---
 
@@ -156,6 +160,11 @@ node-red
 **⑤ 확인**
 - MQTT 노드 2개(`sfaas/raw/#`, `sfaas/hb/#`) 아래에 초록 **connected**
 - 탭이 흐리게(꺼짐) 보이면: 탭 이름 더블클릭 → 아래쪽 **Enabled** 켜기 → Done → Deploy
+
+> 🆕 **11/20 이전에 Node-RED를 설정했다면 (재생 끝 정리 노드):** 위에서 새로 가져오면 이미 들어 있어요. 기존 것을 그대로 쓰면
+> 1. 메뉴 ≡ → **Import** → `nodered/재생끝_DC_추가노드.json` → "SFaaS 수집" 탭에 넣기 (노드 3개: 재생 시작·끝 → 재생 끝 → 모두 DC → DB)
+> 2. `sfaas/hb/#` 옆 상태 신호 함수 노드 맨 위에 한 줄: `if (global.get('replayRunning') === false) return null;`
+> 3. **Deploy**. 재생이 끝나면 1~2초 안에 모든 설비가 DC가 되고, 끝난 뒤 가짜 대기(후공정 정지 대기·재공부족)가 안 생겨요
 
 ---
 
@@ -329,15 +338,38 @@ SELECT (SELECT COUNT(*) FROM slitting_data), (SELECT COUNT(*) FROM press_data), 
 | 같은 날 두 번째 재생 숫자가 이상함 | 재생 전에 8단계 ④(DB 비우기)를 안 했어요 |
 
 ### 다른 PC의 DB에 붙을 때 (선택)
-백엔드만 내 PC에서 돌리고 DB·Node-RED·player는 다른 PC(예: PM PC)를 쓸 때:
-- `application-local.yml`에 `url: jdbc:postgresql://{그 PC IP}:5432/sfaas` 추가, 비밀번호는 그 PC의 `sfaas_be` 비밀번호
-- ⚠️ **같은 DB에 판정하는 백엔드는 한 대만.** 내 백엔드의 판정을 끄려면 `application-local.yml` 맨 아래에:
+DB·Node-RED·player는 한 PC(예: PM PC)에서 돌리고, 내 PC에서는 **백엔드·프론트만** 켜서 결과를 볼 때예요.
+백엔드는 MQTT를 쓰지 않고 DB만 읽어서, DB에만 붙으면 돼요. 내 PC에는 3~5단계(DB·Node-RED·player)가 필요 없어요.
+
+**① DB PC에서 (한 번만, 관리자 PowerShell)**
+- 방화벽 열기: `New-NetFirewallRule -DisplayName "PostgreSQL 5432" -Direction Inbound -Protocol TCP -LocalPort 5432 -Action Allow -Profile Private`
+- `C:\Program Files\PostgreSQL\17\data\pg_hba.conf` 맨 아래에 한 줄 추가 (같은 와이파이 대역, 예: 192.168.0.x):
+  ```
+  host    sfaas    sfaas_be    192.168.0.0/24    scram-sha-256
+  ```
+- `postgresql.conf`의 `listen_addresses`가 `'*'`인지 확인 (설치 기본값)
+- PostgreSQL 다시 시작: `Restart-Service postgresql-x64-17`
+- DB PC IP 확인: `ipconfig` → 무선 LAN의 IPv4 주소
+
+**② 내 PC (백엔드) `application-local.yml`**
+```yaml
+spring:
+  datasource:
+    url: jdbc:postgresql://{DB PC IP}:5432/sfaas
+    username: sfaas_be
+    password: {DB PC의 sfaas_be 비밀번호}
+```
+- 접속 시험: `Test-NetConnection {DB PC IP} -Port 5432` → `TcpTestSucceeded : True`
+- AI 보고서 키(`ai.report.api-key`)는 내 PC 설정에 넣어요 (6단계)
+
+**③ 판정은 그 DB를 보는 백엔드 한 대만**
+- DB PC에서 백엔드를 **안 켜면**: 내 백엔드가 판정해요. 그대로 두면 돼요 (기본값)
+- DB PC에서도 백엔드를 **켜 두면**: 둘이 같이 판정해서 기록이 겹쳐요. 내 백엔드 판정을 꺼요:
   ```yaml
   sfaas:
     judge:
       enabled: false
   ```
-- 접속 시험: `Test-NetConnection {그 PC IP} -Port 5432` → `TcpTestSucceeded : True`
 
 ---
 
@@ -345,7 +377,7 @@ SELECT (SELECT COUNT(*) FROM slitting_data), (SELECT COUNT(*) FROM press_data), 
 
 | 위치 | 내용 |
 |---|---|
-| `schema.sql` · `grants.sql` · `seed.sql` · `demo_user.sql` · `demo_reset.sql` · `alter_v0.3.9.sql` · `alter_v0.3.10.sql` | DB (alter는 예전에 만든 DB를 새 버전으로 올릴 때만) |
+| `schema.sql` · `grants.sql` · `seed.sql` · `demo_user.sql` · `demo_reset.sql` · `alter_v0.3.9.sql` · `alter_v0.3.10.sql` · `alter_v0.3.11.sql` | DB (alter는 예전에 만든 DB를 새 버전으로 올릴 때만) |
 | `player/` | 재생 프로그램 `player.py`, 설정(`config*.json`), API 확인 `api_check.ps1`, 자세한 설명 `README.md` |
 | `nodered/flows_now/` | Node-RED 플로우: `kamp_flows.json`(수집, 필수) · `plc_flows.json`(교육장 실제 인버터용, 선택) |
 | `nodered/*.js` | 플로우 안 함수 코드의 사본 (참고용) |

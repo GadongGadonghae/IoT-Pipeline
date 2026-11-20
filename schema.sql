@@ -1,6 +1,6 @@
 -- =====================================================================
 -- 라인 가동 현황 모니터링 시스템 · DB 스키마 (PostgreSQL)
--- 1조 가동가동해 · 작성 2026-11-18 · v0.3.10
+-- 1조 가동가동해 · 작성 2026-11-18 · v0.3.13 (11/20 계정 권한)
 --
 -- 실행 방법:  psql -U postgres -d sfaas -f schema.sql
 -- 이 파일이 DB 구조의 "정답지"예요. 테이블을 바꿀 땐 이 파일을 고치고 GitHub에 올려요.
@@ -8,6 +8,14 @@
 --
 -- ★ 현재 처리 시간 (v0.3.9, seed.sql): 슬리팅 16 · 프레스 17 (1대당, 라인에 4대) · 용접 17 · 도장 4 · 비전 검사 2초 (11/18 7→2초)
 --   라인 박자 16초. 프레스(17초 > 박자 16초) 앞에 재공이 조금씩 쌓여요. 아래 버전별 기록의 처리 시간은 그때 값이에요.
+--
+-- v0.3.13 변경 (11/20 계정 권한, alter_v0.3.13.sql)
+--   · users.role = PLANT_MANAGER 공장장 · PRODUCTION_MANAGER 생산관리팀장 · LINE_MANAGER 라인 담당자 (기본값 LINE_MANAGER)
+--   · 테이블 구조는 그대로. 공장장 승인은 reassignment_report.approved·approved_by·approved_at을 씀
+--
+-- v0.3.12 변경 (11/20 과거 기록 10일치 넣고 조회가 느려져서, alter_v0.3.12.sql)
+--   · 시각 색인 추가: product_flow(started_at)·(ended_at), 공정 테이블 4개(measured_at), inspection_result(inspected_at)
+--   · 테이블 구조·데이터는 그대로
 --
 -- v0.3.10 변경 (11/19 계획수정 보고서 저장, alter_v0.3.10.sql)
 --   · reassignment_report에 계산 기준(created_by·kind·base_at·ct_sec·stopped_plan·stopped_done·target_qty·unmet_qty)과 AI 문장(ai_content) 칸 추가
@@ -129,13 +137,13 @@ CREATE TABLE downtime_code (
     description  VARCHAR(100)
 );
 
--- 사용자 (로그인 계정). 역할 종류는 추후 결정
+-- 사용자 (로그인 계정). 역할(권한)은 v0.3.13에서 3가지로 확정 (Back-End auth/Roles.java)
 CREATE TABLE users (
     user_id        SERIAL       PRIMARY KEY,
     login_id       VARCHAR(30)  NOT NULL UNIQUE,
     password_hash  VARCHAR(100) NOT NULL,           -- 비밀번호 원문 저장 금지! Spring Security BCrypt 결과를 저장
     user_name      VARCHAR(20)  NOT NULL,           -- 조치 담당자 이름은 여기서 가져와요
-    role           VARCHAR(20)  NOT NULL DEFAULT 'MANAGER',
+    role           VARCHAR(20)  NOT NULL DEFAULT 'LINE_MANAGER',  -- v0.3.13: PLANT_MANAGER 공장장 · PRODUCTION_MANAGER 생산관리팀장 · LINE_MANAGER 라인 담당자
     email          VARCHAR(100),
     memo           VARCHAR(200),
     last_login_at  TIMESTAMP,
@@ -266,6 +274,12 @@ CREATE INDEX idx_painting_eq_time ON painting_data (equipment_id, measured_at);
 CREATE INDEX idx_painting_line_time ON painting_data (line_id, measured_at);
 CREATE INDEX idx_inspection_result_line_time ON inspection_result (line_id, inspected_at);
 CREATE INDEX idx_coil_time        ON coil_receipt  (received_at);
+-- v0.3.12: 날짜 범위 집계용 (가동률·생산량 일/주/월). 위 (설비, 시각) 색인은 설비를 정하지 않으면 못 써요
+CREATE INDEX idx_slitting_time   ON slitting_data (measured_at);
+CREATE INDEX idx_press_time      ON press_data    (measured_at);
+CREATE INDEX idx_welding_time    ON welding_data  (measured_at);
+CREATE INDEX idx_painting_time   ON painting_data (measured_at);
+CREATE INDEX idx_inspection_time ON inspection_result (inspected_at);
 
 -- 🆕 v0.3.9 공정 이동 기록: 제품이 설비 1대를 거칠 때마다 1줄 (프레스는 PR1~PR4 각각 1줄)
 -- 들어갈 때 INSERT(started_at), 나갈 때 같은 줄 UPDATE(ended_at). 나갈 때는 공정 테이블 INSERT와 같은 시각 값
@@ -284,6 +298,8 @@ CREATE TABLE product_flow (
 CREATE INDEX idx_flow_open    ON product_flow (equipment_id) WHERE ended_at IS NULL;   -- 처리 중 조회용
 CREATE INDEX idx_flow_started ON product_flow (equipment_id, started_at);              -- CT·시간대 조회용
 CREATE INDEX idx_flow_line    ON product_flow (line_id, equipment_id);                 -- 라인별 재공용
+CREATE INDEX idx_flow_started_at ON product_flow (started_at);                         -- v0.3.12 오늘 재공·위치 (백엔드 1초마다)
+CREATE INDEX idx_flow_ended_at   ON product_flow (ended_at);                           -- v0.3.12
 
 
 -- =====================================================================
@@ -381,7 +397,7 @@ CREATE INDEX idx_paint_route_line_time ON paint_route_history (line_id, changed_
 -- ※ 지금은 계획서 작성까지만. 재배정을 할 수도 있어서 승인 칸은 두고 비워 둠 (v0.3.4)
 CREATE TABLE reassignment_report (
     report_id     BIGSERIAL   PRIMARY KEY,
-    downtime_id   BIGINT      REFERENCES downtime_event(downtime_id),   -- v0.3.11: 추가 주문 배정(kind = order)은 NULL
+    downtime_id   BIGINT      REFERENCES downtime_event(downtime_id),   -- v0.3.14: 추가 주문 배정(kind = order)은 NULL
     loss_qty      INTEGER     NOT NULL,             -- 손실 수량 = 정지 시간 × 라인 시간당 생산 능력
     created_at    TIMESTAMP   NOT NULL DEFAULT now(),
     approved      BOOLEAN     NOT NULL DEFAULT FALSE,   -- 관리자 승인 여부 (지금은 안 씀)
@@ -389,7 +405,7 @@ CREATE TABLE reassignment_report (
     approved_at   TIMESTAMP,
     -- v0.3.10 계획수정 보고서 (R-03): 계산 기준과 AI 문장
     created_by    INTEGER     REFERENCES users(user_id),  -- 만든 사람
-    kind          VARCHAR(10),                      -- line 라인 전체 정지 / paint 도장 1대 → 다른 1대 / vision 대체 없음 / order 추가 주문 배정 (v0.3.11)
+    kind          VARCHAR(10),                      -- line 라인 전체 정지 / paint 도장 1대 → 다른 1대 / vision 대체 없음 / order 추가 주문 배정 (v0.3.14)
     base_at       TIMESTAMP,                        -- 계산 기준 시각 (오늘 건 = 만든 시각, 지난 날 건 = 고장 시작)
     ct_sec        NUMERIC(6,2),                     -- 계산에 쓴 CT
     stopped_plan  INTEGER,                          -- 멈춘 쪽 그날 계획
