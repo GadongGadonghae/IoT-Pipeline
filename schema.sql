@@ -1,6 +1,6 @@
 -- =====================================================================
 -- 라인 가동 현황 모니터링 시스템 · DB 스키마 (PostgreSQL)
--- 1조 가동가동해 · 작성 2026-11-18 · v0.3.10
+-- 1조 가동가동해 · 작성 2026-11-18 · v0.3.12 (11/20 시각 색인)
 --
 -- 실행 방법:  psql -U postgres -d sfaas -f schema.sql
 -- 이 파일이 DB 구조의 "정답지"예요. 테이블을 바꿀 땐 이 파일을 고치고 GitHub에 올려요.
@@ -8,6 +8,10 @@
 --
 -- ★ 현재 처리 시간 (v0.3.9, seed.sql): 슬리팅 16 · 프레스 17 (1대당, 라인에 4대) · 용접 17 · 도장 4 · 비전 검사 2초 (11/18 7→2초)
 --   라인 박자 16초. 프레스(17초 > 박자 16초) 앞에 재공이 조금씩 쌓여요. 아래 버전별 기록의 처리 시간은 그때 값이에요.
+--
+-- v0.3.12 변경 (11/20 과거 기록 10일치 넣고 조회가 느려져서, alter_v0.3.12.sql)
+--   · 시각 색인 추가: product_flow(started_at)·(ended_at), 공정 테이블 4개(measured_at), inspection_result(inspected_at)
+--   · 테이블 구조·데이터는 그대로
 --
 -- v0.3.10 변경 (11/19 계획수정 보고서 저장, alter_v0.3.10.sql)
 --   · reassignment_report에 계산 기준(created_by·kind·base_at·ct_sec·stopped_plan·stopped_done·target_qty·unmet_qty)과 AI 문장(ai_content) 칸 추가
@@ -266,6 +270,12 @@ CREATE INDEX idx_painting_eq_time ON painting_data (equipment_id, measured_at);
 CREATE INDEX idx_painting_line_time ON painting_data (line_id, measured_at);
 CREATE INDEX idx_inspection_result_line_time ON inspection_result (line_id, inspected_at);
 CREATE INDEX idx_coil_time        ON coil_receipt  (received_at);
+-- v0.3.12: 날짜 범위 집계용 (가동률·생산량 일/주/월). 위 (설비, 시각) 색인은 설비를 정하지 않으면 못 써요
+CREATE INDEX idx_slitting_time   ON slitting_data (measured_at);
+CREATE INDEX idx_press_time      ON press_data    (measured_at);
+CREATE INDEX idx_welding_time    ON welding_data  (measured_at);
+CREATE INDEX idx_painting_time   ON painting_data (measured_at);
+CREATE INDEX idx_inspection_time ON inspection_result (inspected_at);
 
 -- 🆕 v0.3.9 공정 이동 기록: 제품이 설비 1대를 거칠 때마다 1줄 (프레스는 PR1~PR4 각각 1줄)
 -- 들어갈 때 INSERT(started_at), 나갈 때 같은 줄 UPDATE(ended_at). 나갈 때는 공정 테이블 INSERT와 같은 시각 값
@@ -284,6 +294,8 @@ CREATE TABLE product_flow (
 CREATE INDEX idx_flow_open    ON product_flow (equipment_id) WHERE ended_at IS NULL;   -- 처리 중 조회용
 CREATE INDEX idx_flow_started ON product_flow (equipment_id, started_at);              -- CT·시간대 조회용
 CREATE INDEX idx_flow_line    ON product_flow (line_id, equipment_id);                 -- 라인별 재공용
+CREATE INDEX idx_flow_started_at ON product_flow (started_at);                         -- v0.3.12 오늘 재공·위치 (백엔드 1초마다)
+CREATE INDEX idx_flow_ended_at   ON product_flow (ended_at);                           -- v0.3.12
 
 
 -- =====================================================================
