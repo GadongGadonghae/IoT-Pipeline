@@ -1,6 +1,6 @@
 -- =====================================================================
 -- 라인 가동 현황 모니터링 시스템 · DB 스키마 (PostgreSQL)
--- 1조 가동가동해 · 작성 2026-11-18 · v0.3.12 (11/20 시각 색인)
+-- 1조 가동가동해 · 작성 2026-11-18 · v0.3.13 (11/20 계정 권한)
 --
 -- 실행 방법:  psql -U postgres -d sfaas -f schema.sql
 -- 이 파일이 DB 구조의 "정답지"예요. 테이블을 바꿀 땐 이 파일을 고치고 GitHub에 올려요.
@@ -8,6 +8,10 @@
 --
 -- ★ 현재 처리 시간 (v0.3.9, seed.sql): 슬리팅 16 · 프레스 17 (1대당, 라인에 4대) · 용접 17 · 도장 4 · 비전 검사 2초 (11/18 7→2초)
 --   라인 박자 16초. 프레스(17초 > 박자 16초) 앞에 재공이 조금씩 쌓여요. 아래 버전별 기록의 처리 시간은 그때 값이에요.
+--
+-- v0.3.13 변경 (11/20 계정 권한, alter_v0.3.13.sql)
+--   · users.role = PLANT_MANAGER 공장장 · PRODUCTION_MANAGER 생산관리팀장 · LINE_MANAGER 라인 담당자 (기본값 LINE_MANAGER)
+--   · 테이블 구조는 그대로. 공장장 승인은 reassignment_report.approved·approved_by·approved_at을 씀
 --
 -- v0.3.12 변경 (11/20 과거 기록 10일치 넣고 조회가 느려져서, alter_v0.3.12.sql)
 --   · 시각 색인 추가: product_flow(started_at)·(ended_at), 공정 테이블 4개(measured_at), inspection_result(inspected_at)
@@ -133,13 +137,13 @@ CREATE TABLE downtime_code (
     description  VARCHAR(100)
 );
 
--- 사용자 (로그인 계정). 역할 종류는 추후 결정
+-- 사용자 (로그인 계정). 역할(권한)은 v0.3.13에서 3가지로 확정 (Back-End auth/Roles.java)
 CREATE TABLE users (
     user_id        SERIAL       PRIMARY KEY,
     login_id       VARCHAR(30)  NOT NULL UNIQUE,
     password_hash  VARCHAR(100) NOT NULL,           -- 비밀번호 원문 저장 금지! Spring Security BCrypt 결과를 저장
     user_name      VARCHAR(20)  NOT NULL,           -- 조치 담당자 이름은 여기서 가져와요
-    role           VARCHAR(20)  NOT NULL DEFAULT 'MANAGER',
+    role           VARCHAR(20)  NOT NULL DEFAULT 'LINE_MANAGER',  -- v0.3.13: PLANT_MANAGER 공장장 · PRODUCTION_MANAGER 생산관리팀장 · LINE_MANAGER 라인 담당자
     email          VARCHAR(100),
     memo           VARCHAR(200),
     last_login_at  TIMESTAMP,

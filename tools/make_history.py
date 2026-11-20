@@ -1,4 +1,4 @@
-"""과거 기록(시연용 더미 데이터) 생성기 · DB v0.3.11 · 2026-11-20
+"""과거 기록(시연용 더미 데이터) 생성기 · DB v0.3.13 · 2026-11-20
 사용: python make_history.py [기준 날짜] [--days 3]
   예) python make_history.py 2026-11-24          → 11/21·11/22·11/23 3일치
       python make_history.py 2026-11-20 --days 1 → 11/19 하루치
@@ -25,6 +25,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ap = argparse.ArgumentParser(description="과거 기록(더미) SQL 만들기")
 ap.add_argument("base", nargs="?", default=date.today().isoformat(), help="기준 날짜 (이 날짜 전 N일을 만듦). 기본 오늘")
 ap.add_argument("--days", type=int, default=3, help="만들 날 수 (기본 3)")
+ap.add_argument("--no-morning", action="store_true", help="기준 날짜(오늘) 오전 더미를 넣지 않음")
 ap.add_argument("--kamp", default=os.path.join(HERE, "..", "..", "kamp_data"), help="KAMP 원본 폴더")
 ap.add_argument("--out", default=os.path.join(HERE, "..", "history"), help="출력 폴더")
 args = ap.parse_args()
@@ -47,7 +48,12 @@ IDLE_MIN = 10                         # 이 초 이상인 대기만 I로 기록
 P_PRESS_STAGE = 0.00075               # 프레스 단마다 (4단 합계 약 0.3%)
 P_WELD, P_PAINT, P_VISION = 0.001, 0.001, 0.01
 BREAKS_PER_DAY = (2, 3)
-BREAK_MIN = (10, 40)                  # 고장 길이(분)
+BREAK_MIN = (30, 50)                  # 고장 길이(분). 11/20: 가동률 화면에서 잘 보이게 30분 이상
+# 오늘(기준 날짜) 오전 더미 (11/20): 리허설은 점심 뒤에 시작한다고 보고 08:00~12:00 가동 + 12:00~13:00 점심을 넣어요
+MORNING_INPUT_END = 11 * 3600 + 52 * 60   # 투입 끝 → 12:00 전에 모두 처리되게
+MORNING_BREAKS = (1, 2)                   # 오전 고장 건수
+MORNING_PID_OFFSET = 5000                 # 오전 제품 번호 5001부터 (리허설 0001~과 안 겹치게)
+DEMO_START = 13 * 3600                    # 이 시각 전 오늘 기록은 더미로 바꾸고, demo_reset은 이 뒤만 지워요
 BREAK_MEMO = {   # 고장 조치 메모 (설비 종류별)
     "SL": ["슬리팅 나이프 이빨 빠짐 → 나이프 교체", "인버터 과전류 트립 → 리셋 후 점검", "코일 언코일러 걸림 → 재정렬"],
     "PR": ["유압 호스 누유 → 호스 교체", "금형 센서 오작동 → 센서 재설치", "모터 과열 → 냉각 후 재가동",
@@ -123,16 +129,18 @@ def run(eq, free, arrive, base, pauses):
             end += b - a
     return start, end
 
-def simulate(day):
+def simulate(day, close=CLOSE, hard_end=None, pid_offset=0, n_breaks=BREAKS_PER_DAY):
+    """하루(또는 오전) 흐름. close = 투입 끝, hard_end = 이 시각을 넘겨 끝나는 제품은 통째로 뺌(오전 더미: 12:00)"""
     dstr = day.strftime("%Y%m%d")
     pauses = {eq: [LUNCH] for eq in EQS}
     breaks = []
     cand = [e for e in EQS if e[0] in LINES and "-" in e]
-    for _ in range(random.randint(*BREAKS_PER_DAY)):
+    last_ok = (hard_end or CLOSE) - 1800   # 고장이 끝난 뒤 30분은 다시 흐르게
+    for _ in range(random.randint(*n_breaks)):
         for _try in range(50):
             eq = random.choice(cand)
             dur = random.randint(BREAK_MIN[0] * 60, BREAK_MIN[1] * 60)
-            a = random.randint(OPEN + 1800, CLOSE - 1800 - dur)
+            a = random.randint(OPEN + 1800, last_ok - dur)
             b = a + dur
             if b <= LUNCH[0] or a >= LUNCH[1]:
                 if all(x[0] != eq or b <= x[1] or a >= x[2] for x in breaks):
@@ -150,7 +158,7 @@ def simulate(day):
         slot, k = float(OPEN), 0
         pr1_starts, wd_starts = [], []           # 자리 수 계산용: 프레스1·용접에 들어간 시각 (들어간 순서)
         while True:
-            pid = f"{line}-{dstr}-{k + 1:04d}"
+            pid = f"{line}-{dstr}-{k + 1 + pid_offset:04d}"
             t, prev, alive = slot, None, True
             for kind, eq, base in stages:
                 blk = None
@@ -159,7 +167,7 @@ def simulate(day):
                     t = blk[1]
                 start, end = run(eq, free[eq], t, base, pauses)
                 if kind == "SL":
-                    if start >= CLOSE:
+                    if start >= close:
                         alive = None
                         break
                     slot = start + TAKT
@@ -201,12 +209,6 @@ def simulate(day):
                 to_paint.append((t, line, pid))
             k += 1
 
-    # 코일이 딱 맞게: 그날 투입 수를 20의 배수로 (가장 늦게 들어간 제품부터 뺌 → 앞 제품 시각에는 영향 없음)
-    sl = sorted((r for r in rows if r["kind"] == "SL"), key=lambda r: r["s"])
-    drop = {r["pid"] for r in sl[len(sl) - len(sl) % 20:]} if len(sl) % 20 else set()
-    rows = [r for r in rows if r["pid"] not in drop]
-    to_paint = [x for x in to_paint if x[2] not in drop]
-
     # 도장 (공용 2대, 먼저 온 순서)
     pfree = {"PT1": float(OPEN), "PT2": float(OPEN)}
     to_vi = []
@@ -229,11 +231,21 @@ def simulate(day):
         vfree = end
         rows.append(dict(kind="VI", eq="VI", line=line, pid=pid, s=start, t=end, rel=end, paint=pt, blk=None,
                          result="NG" if random.random() < P_VISION else "OK", vals={}, alarm=None))
+
+    # 오전 더미: hard_end(12:00)를 넘겨 끝나는 제품은 통째로 빼요 (점심 뒤로 넘어가는 재공이 남지 않게)
+    if hard_end is not None:
+        late = {r["pid"] for r in rows if r["rel"] > hard_end}
+        rows = [r for r in rows if r["pid"] not in late]
+    # 코일이 딱 맞게: 그날 투입 수를 20의 배수로 (가장 늦게 들어간 제품부터 통째로 뺌)
+    sl = sorted((r for r in rows if r["kind"] == "SL"), key=lambda r: r["s"])
+    drop = {r["pid"] for r in sl[len(sl) - len(sl) % 20:]} if len(sl) % 20 else set()
+    rows = [r for r in rows if r["pid"] not in drop]
     return rows, breaks, sl
 
 # ---------------- 상태 이력 (1초 단위로 칠해서 구간으로 묶음) ----------------
 R, SHORT, BLOCK, D, S, OFF = range(6)
-def timeline(rows, breaks):
+def timeline(rows, breaks, lunch_from_last=False):
+    """lunch_from_last: 오전 더미 — 설비마다 마지막 처리가 끝난 때부터 13:00까지 점심(S)으로"""
     day_end = int(math.ceil(max(r["rel"] for r in rows))) + 1
     L = day_end - OPEN
     out = {}
@@ -277,6 +289,8 @@ def timeline(rows, breaks):
             if arr[i] != OFF:
                 segs.append((int(arr[i]), OPEN + i, OPEN + j))
             i = j
+        if lunch_from_last:
+            segs.append((S, int(math.ceil(last)), LUNCH[1]))
         out[eq] = segs
     return out
 
@@ -303,47 +317,64 @@ def copy(table, cols, recs):
     out_lines.append("\\.")
 
 first, base_s = DAYS[0].isoformat(), BASE.isoformat()
+MORNING = not args.no_morning
+# 지우는 경계: 오전 더미를 넣으면 오늘 13:00 전까지 (그 뒤 = 실제 리허설·시연 기록은 그대로)
+cut = f"{base_s} {DEMO_START // 3600:02d}:00:00" if MORNING else base_s
+MORNING_NOTE = (f"+ 오늘({base_s}) 오전 08:00~12:00 가동 더미 + 점심~13:00 (리허설은 13:00 뒤 시작, 제품 번호 5001~)"
+                if MORNING else "오늘 오전 더미 없음 (--no-morning)")
 out_lines.append(f"""-- =====================================================================
--- 과거 기록 (시연용 더미) · {first} ~ {DAYS[-1].isoformat()} ({len(DAYS)}일) · DB v0.3.11
--- make_history.py {base_s} --days {len(DAYS)} 로 만듦. 08:00~19:00 (점심 12~13시 계획정지)
--- ⚠️ 맨 앞에서 {base_s} 이전 기록을 전부 지우고 새로 넣어요. {base_s}(오늘) 기록은 그대로 둬요.
+-- 과거 기록 (시연용 더미) · {first} ~ {DAYS[-1].isoformat()} ({len(DAYS)}일) · DB v0.3.13
+-- make_history.py {base_s} --days {len(DAYS)} 로 만듦. 08:00~19:00 (점심 12~13시 계획정지), 고장 30~50분
+-- {MORNING_NOTE}
+-- ⚠️ 맨 앞에서 {cut} 이전 기록을 전부 지우고 새로 넣어요. 그 뒤 기록(리허설·시연)은 그대로 둬요.
+--    오전 더미를 쓰면 발표 당일 점심 뒤(13:00 이후), 리허설 직전에 실행해요 (오전에 백엔드가 남긴 상태 기록을 더미로 바꿈)
 -- 실행: SQL Shell에서  \\i C:/jyc/sfaas_project/sfaas/history/history_{BASE.strftime('%Y%m%d')}.sql
 -- =====================================================================
 SET client_encoding = 'UTF8';
 BEGIN;
 
--- 0. {base_s} 이전 기록 지우기 (외래키 순서대로)
-DELETE FROM reassignment_report r USING downtime_event d WHERE r.downtime_id = d.downtime_id AND d.started_at < '{base_s}';
-DELETE FROM equipment_status_history WHERE started_at < '{base_s}';
-DELETE FROM downtime_event WHERE started_at < '{base_s}';
-DELETE FROM alarm WHERE raised_at < '{base_s}';
-DELETE FROM product_flow WHERE COALESCE(started_at, ended_at) < '{base_s}';
-DELETE FROM slitting_data WHERE measured_at < '{base_s}';
-DELETE FROM press_data WHERE measured_at < '{base_s}';
-DELETE FROM welding_data WHERE measured_at < '{base_s}';
-DELETE FROM painting_data WHERE measured_at < '{base_s}';
-DELETE FROM inspection_result WHERE inspected_at < '{base_s}';
-DELETE FROM coil_receipt WHERE received_at < '{base_s}';
-DELETE FROM paint_route_history WHERE changed_at < '{base_s}';
+-- 0. {cut} 이전 기록 지우기 (외래키 순서대로)
+DELETE FROM reassignment_report r USING downtime_event d WHERE r.downtime_id = d.downtime_id AND d.started_at < '{cut}';
+DELETE FROM equipment_status_history WHERE started_at < '{cut}';
+DELETE FROM downtime_event WHERE started_at < '{cut}';
+DELETE FROM alarm WHERE raised_at < '{cut}';
+DELETE FROM product_flow WHERE COALESCE(started_at, ended_at) < '{cut}';
+DELETE FROM slitting_data WHERE measured_at < '{cut}';
+DELETE FROM press_data WHERE measured_at < '{cut}';
+DELETE FROM welding_data WHERE measured_at < '{cut}';
+DELETE FROM painting_data WHERE measured_at < '{cut}';
+DELETE FROM inspection_result WHERE inspected_at < '{cut}';
+DELETE FROM coil_receipt WHERE received_at < '{cut}';
+DELETE FROM paint_route_history WHERE changed_at < '{cut}';
 DELETE FROM production_target WHERE target_date < '{base_s}';
 """)
 
 summary = []
 group_no = 0
-for day in DAYS:
-    rows, breaks, sl = simulate(day)
-    tl = timeline(rows, breaks)
+for day, morning_only in [(x, False) for x in DAYS] + ([(BASE, True)] if MORNING else []):
+    if morning_only:
+        rows, breaks, sl = simulate(day, close=MORNING_INPUT_END, hard_end=LUNCH[0], pid_offset=MORNING_PID_OFFSET, n_breaks=MORNING_BREAKS)
+    else:
+        rows, breaks, sl = simulate(day)
+    tl = timeline(rows, breaks, lunch_from_last=morning_only)
     d = lambda sec: ts(day, sec)
-    out_lines.append(f"\n-- ===== {day.isoformat()} =====")
-    copy("production_target", ["target_date", "line_id", "target_qty", "created_at"],
-         [(day.isoformat(), l, TARGET, f"{(day - timedelta(days=1)).isoformat()} 17:00:00") for l in LINES])
+    out_lines.append(f"\n-- ===== {day.isoformat()}{' 오전 (08:00~12:00 + 점심)' if morning_only else ''} =====")
+    if morning_only:
+        # 오늘 목표는 공장장이 이미 정했으면 그대로 둬요
+        out_lines.append("INSERT INTO production_target (target_date, line_id, target_qty, created_at) VALUES\n"
+                         + ",\n".join(f"    ('{day.isoformat()}', '{l}', {TARGET}, '{(day - timedelta(days=1)).isoformat()} 17:00:00')" for l in LINES)
+                         + "\nON CONFLICT (target_date, line_id) DO NOTHING;")
+    else:
+        copy("production_target", ["target_date", "line_id", "target_qty", "created_at"],
+             [(day.isoformat(), l, TARGET, f"{(day - timedelta(days=1)).isoformat()} 17:00:00") for l in LINES])
     kept = {x["pid"] for x in rows if x["kind"] == "SL"}
     morning = sum(1 for r in sl if r["s"] < LUNCH[0] and r["pid"] in kept)
     n_sl = len(kept)
     rolls = n_sl // 20
     r1 = min(rolls, -(-morning // 20))
     copy("coil_receipt", ["material_id", "received_at", "product_qty"],
-         [(f"COIL-{day.strftime('%Y%m%d')}-{i:03d}", f"{day.isoformat()} {'07:30:00' if i <= r1 else '12:30:00'}", 20)
+         [(f"COIL-{day.strftime('%Y%m%d')}-{i + (500 if morning_only else 0):03d}",   # 오전 더미 코일은 501번부터 (리허설 입고 001~과 안 겹치게)
+           f"{day.isoformat()} {'07:30:00' if i <= r1 else '12:30:00'}", 20)
           for i in range(1, rolls + 1)])
     srt = lambda kind: sorted((r for r in rows if r["kind"] == kind), key=lambda r: (r["t"], r["eq"]))
     copy("slitting_data", ["product_id", "equipment_id", "measured_at", "result"],
@@ -407,7 +438,7 @@ for day in DAYS:
     copy("equipment_status_history", ["equipment_id", "status", "started_at", "ended_at"], sorted(st, key=lambda x: (x[2], x[0])))
 
     vi = [r for r in rows if r["kind"] == "VI"]
-    summary.append(dict(day=day.isoformat(), input=n_sl, coils=rolls,
+    summary.append(dict(day=day.isoformat() + (" 오전" if morning_only else ""), input=n_sl, coils=rolls,
                         shipped={l: sum(1 for r in vi if r["line"] == l and r["result"] == "OK") for l in LINES},
                         process_ng=sum(1 for r in rows if r["kind"] in ("PR", "WD", "PT") and r["result"] == "NG"),
                         vision_ng=sum(1 for r in vi if r["result"] == "NG"),
@@ -426,14 +457,14 @@ WHERE d.stop_group_id = m.g;
 UPDATE equipment_status_history h SET downtime_id = d.downtime_id
 FROM downtime_event d
 WHERE h.equipment_id = d.equipment_id AND h.started_at = d.started_at AND h.status <> 'R'
-  AND h.started_at < '{base_s}' AND h.downtime_id IS NULL;
+  AND h.started_at < '{cut}' AND h.downtime_id IS NULL;
 
 COMMIT;
 ANALYZE;
 
 -- 확인: 날짜별 출고 양품 수
 SELECT inspected_at::date AS day, count(*) FILTER (WHERE result = 'OK') AS shipped, count(*) FILTER (WHERE result = 'NG') AS vision_ng
-FROM inspection_result WHERE inspected_at < '{base_s}' GROUP BY 1 ORDER BY 1;
+FROM inspection_result WHERE inspected_at < '{cut}' GROUP BY 1 ORDER BY 1;
 """)
 
 os.makedirs(args.out, exist_ok=True)
