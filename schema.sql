@@ -402,7 +402,7 @@ CREATE INDEX idx_paint_route_line_time ON paint_route_history (line_id, changed_
 -- ※ 지금은 계획서 작성까지만. 재배정을 할 수도 있어서 승인 칸은 두고 비워 둠 (v0.3.4)
 CREATE TABLE reassignment_report (
     report_id     BIGSERIAL   PRIMARY KEY,
-    downtime_id   BIGINT      REFERENCES downtime_event(downtime_id),  -- v0.3.14: 목표 변경 보고서(kind target)는 NULL
+    downtime_id   BIGINT      REFERENCES downtime_event(downtime_id),  -- v0.3.14: 고장 건 없는 보고서(kind target 목표 변경 · order 추가 주문 배정)는 NULL
     loss_qty      INTEGER     NOT NULL,             -- 손실 수량 = 정지 시간 × 라인 시간당 생산 능력
     created_at    TIMESTAMP   NOT NULL DEFAULT now(),
     approved      BOOLEAN     NOT NULL DEFAULT FALSE,   -- 관리자 승인 여부 (지금은 안 씀)
@@ -410,7 +410,7 @@ CREATE TABLE reassignment_report (
     approved_at   TIMESTAMP,
     -- v0.3.10 계획수정 보고서 (R-03): 계산 기준과 AI 문장
     created_by    INTEGER     REFERENCES users(user_id),  -- 만든 사람
-    kind          VARCHAR(10),                      -- line 라인 전체 정지 / paint 도장 1대 → 다른 1대 / vision 대체 없음 / target 생산 목표 변경 (v0.3.14)
+    kind          VARCHAR(10),                      -- line 라인 전체 정지 / paint 도장 1대 → 다른 1대 / vision 대체 없음 / target 생산 목표 변경 / order 추가 주문 배정 (v0.3.14)
     base_at       TIMESTAMP,                        -- 계산 기준 시각 (오늘 건 = 만든 시각, 지난 날 건 = 고장 시작)
     ct_sec        NUMERIC(6,2),                     -- 계산에 쓴 CT
     stopped_plan  INTEGER,                          -- 멈춘 쪽 그날 계획

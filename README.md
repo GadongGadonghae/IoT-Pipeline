@@ -123,9 +123,11 @@ CREATE DATABASE sfaas ENCODING 'UTF8' TEMPLATE template0;
 > \c sfaas
 > \i C:/sfaas/IoT-Pipeline/alter_v0.3.10.sql
 > \i C:/sfaas/IoT-Pipeline/alter_v0.3.11.sql
+> \i C:/sfaas/IoT-Pipeline/alter_v0.3.14.sql
 > ```
 > - v0.3.10 (11/19, AI 계획수정 보고서 저장): 안 하면 백엔드가 `missing column [ai_content]`로 안 켜져요. 마지막에 `kind`, `remaining_plan` 두 줄
 > - v0.3.11 (11/20, 비가동 코드 `UP_BLOCKED` 후공정 정지 대기): 안 하면 프레스 단이 멈춘 뒤 판정 저장이 실패해요. 마지막에 `UP_BLOCKED` 한 줄
+> - v0.3.14 (11/20, AI 추가 주문 배정): 고장 건 없는 보고서(kind = order)를 저장하려고 `reassignment_report.downtime_id`를 비워 둘 수 있게. 안 하면 추가 주문 배정 저장이 실패해요
 > - 중간의 "이미 있습니다" 안내는 정상
 
 ---
