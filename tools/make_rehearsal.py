@@ -1,5 +1,12 @@
 """리허설 데이터 생성기 (DB v0.3.9 · 11/17 제품 추적 + 11/18 공정 시작 시각)
-사용: python make_rehearsal.py <kamp_data 폴더> <출력 폴더> [길이(분), 기본 3]
+사용: python make_rehearsal.py <kamp_data 폴더> <출력 폴더> [길이(분), 기본 3] [옵션 key=value ...]
+  옵션 (11/20 시연 시나리오용, 안 쓰면 예전과 같아요):
+    lines=ABCD          가동 라인 (나머지 라인은 데이터 없음 → 촬영 전에 계획정지로)
+    fault=C-PR3:90:155  고장 설비:시작초:복구초 (복구초 생략 = 끝까지 고장) · fault=none 고장 없음
+    switch=PT1>PT2@300  그 초부터 PT1으로 가던 제품을 PT2로 (도장 경로 전환, AI 보고서 승인 연출)
+    suffix=s2           파일 이름 꼬리 (press_s2.csv …). 기본 {길이}min
+  예) 시나리오 1: python make_rehearsal.py ../../kamp_data ../scenario_1 10 lines=ABCD fault=none suffix=s1
+      시나리오 2: python make_rehearsal.py ../../kamp_data ../scenario_2 10 lines=ABC fault=PT1:150 switch=PT1>PT2@360 suffix=s2
 - 필요: pandas, openpyxl
 - 출력: press·welding·painting·inspection·slitting_<N>min.csv, rehearsal_<N>min_data.sql, 요약 JSON(화면 출력)
 - 방식: 공정마다 대기열이 있는 시뮬레이션. 앞 공정이 끝난 제품이 줄을 서고, 설비가 비면 처리해요.
@@ -22,17 +29,33 @@ random.seed(1118)
 
 # ---------------- 설정 ----------------
 MIN = int(sys.argv[3]) if len(sys.argv) > 3 else 3   # 리허설 길이(분). 명령 3번째 칸 (기본 3)
+OPTS = dict(a.split("=", 1) for a in sys.argv[4:] if "=" in a)   # 시나리오 옵션 (위 설명)
 END = MIN * 60
+SUFFIX = OPTS.get("suffix", f"{MIN}min")
 T0 = datetime(2026, 11, 18, 9, 0, 0)
-LINES = list("ABCDEF")
+LINES = list(OPTS.get("lines", "ABCDEF"))
 PAINT_OF = {l: ("PT1" if l in "ABC" else "PT2") for l in LINES}
 TAKT = 16                            # 라인마다 16초에 1개 투입 (슬리팅 처리 시간과 같음) → 6개 라인 합계 1분에 22.5개 (검사 2초 = 1분에 30개 → 검사는 병목 아님, 11/18)
 CT = dict(SL=16, PR=17, WD=17, PT=4, VI=2)   # 제품 1개 처리 시간(초). 프레스는 1대당, 라인에 4대
 JITTER = 0                           # 처리 시간 흔들림 없음 (11/18 결정: 재공은 공정 처리 시간 차이로만). 예전 값 0.15
 COILS = -(-len(LINES) * -(-END // TAKT) // 20)   # 시작 전 입고 코일 롤 수 (1롤 = 20개). 길이에 맞춰 자동: 3분 4 · 5분 6 · 10분 12
 FAULT_EQ, FAULT_ON, FAULT_OFF = "C-PR3", 90, 155   # 65초 고장 → 1분 이상이라 비가동 1건으로 셈
+if OPTS.get("fault", "").lower() == "none":
+    FAULT_EQ = None
+elif "fault" in OPTS:
+    _f = OPTS["fault"].split(":")
+    FAULT_EQ, FAULT_ON = _f[0], int(_f[1])
+    FAULT_OFF = int(_f[2]) if len(_f) > 2 and _f[2] else 10 ** 9   # 복구 없음 = 끝까지 고장
+SWITCH = None                          # (from, to, 초): 그 초부터 from 도장으로 가던 제품을 to로
+if "switch" in OPTS:
+    _a, _b = OPTS["switch"].split("@")
+    SWITCH = (*_a.split(">"), int(_b))
 NG_PRESS = ("B", 2, "B-PR2")         # (라인, 라인 내 제품 번호 k(0부터), 불량이 나는 프레스) → 우 압력 상한 초과
 VISION_NG = ("E", 2)                 # E라인 2번째로 검사받는 제품
+if "B" not in LINES:
+    NG_PRESS = (LINES[0], 2, f"{LINES[0]}-PR2")
+if "E" not in LINES:
+    VISION_NG = (LINES[-1], 2)
 
 TH = {
     "press": dict(press_time=(540, 570.6), pressure_left=(270, 285.3),
@@ -154,6 +177,11 @@ pfree = {"PT1": 0.0, "PT2": 0.0}
 to_vi = []
 for arr, line, k in sorted(to_paint, key=lambda x: (x[0], x[1])):
     pt = PAINT_OF[line]
+    # 도장 경로 전환 (switch 옵션): 전환 시각 뒤에 시작할 제품은 다른 도장으로 (고장 난 도장 앞에서 기다리던 것도)
+    if SWITCH and pt == SWITCH[0]:
+        s0, _ = run(pt, pfree[pt], arr, CT["PT"], fixed=True)
+        if s0 >= SWITCH[2]:
+            pt, arr = SWITCH[1], max(arr, SWITCH[2])
     start, done = run(pt, pfree[pt], arr, CT["PT"], fixed=True)
     if done > END:
         continue
@@ -201,14 +229,14 @@ def write_csv(name, kind, cols):
         recs.append(rec)
     pd.DataFrame(recs).to_csv(f"{out}/{name}", index=False, encoding="utf-8-sig")
 
-write_csv(f"press_{MIN}min.csv", "PR", PRESS_COLS)
-write_csv(f"welding_{MIN}min.csv", "WD", list(TH["weld"]))
-write_csv(f"painting_{MIN}min.csv", "PT", list(TH["paint"]))
-write_csv(f"slitting_{MIN}min.csv", "SL", [])
+write_csv(f"press_{SUFFIX}.csv", "PR", PRESS_COLS)
+write_csv(f"welding_{SUFFIX}.csv", "WD", list(TH["weld"]))
+write_csv(f"painting_{SUFFIX}.csv", "PT", list(TH["paint"]))
+write_csv(f"slitting_{SUFFIX}.csv", "SL", [])
 pd.DataFrame([{"planned_offset_sec": r["t"], "planned_start_sec": r["s"], "equipment_id": "VI", "product_id": r["pid"], "line_id": r["line"],
                "paint_equipment_id": r["paint"], "result": r["result"], "scenario_note": r["note"]}
               for r in sorted(rows["VI"], key=lambda r: r["t"])]
-             ).to_csv(f"{out}/inspection_{MIN}min.csv", index=False, encoding="utf-8-sig")
+             ).to_csv(f"{out}/inspection_{SUFFIX}.csv", index=False, encoding="utf-8-sig")
 
 # ---------------- SQL ----------------
 def q(v):
@@ -272,14 +300,14 @@ eqs =[f"{l}-SL" for l in LINES] + [f"{l}-PR{n}" for l in LINES for n in range(1,
       [f"{l}-WD" for l in LINES] + ["PT1", "PT2", "VI"]
 st = []
 for e in eqs:
-    if e == FAULT_EQ:
-        st += [(e, "R", ts(0), ts(FAULT_ON)), (e, "D", ts(FAULT_ON), ts(FAULT_OFF)), (e, "R", ts(FAULT_OFF), None)]
+    if FAULT_EQ and e == FAULT_EQ:
+        st += [(e, "R", ts(0), ts(FAULT_ON)), (e, "D", ts(FAULT_ON), ts(min(FAULT_OFF, END))), (e, "R", ts(min(FAULT_OFF, END)), None)]
     else:
         st.append((e, "R", ts(0), None))
 insert("equipment_status_history", ["equipment_id", "status", "started_at", "ended_at"], st,
-       f"7. 상태 이력 ({FAULT_EQ}만 {FAULT_ON}~{FAULT_OFF}초 고장)\n--    ※ 단순화: 앞 공정 대기(I) 구간은 넣지 않음 (백엔드 판정 결과로 생길 부분)")
+       f"7. 상태 이력 ({FAULT_EQ or '고장 없음'}만 {FAULT_ON}~{min(FAULT_OFF, END)}초 고장)\n--    ※ 단순화: 앞 공정 대기(I) 구간은 넣지 않음 (백엔드 판정 결과로 생길 부분)")
 insert("downtime_event", ["equipment_id", "status", "code", "detail", "started_at", "ended_at", "action_memo"],
-       [(FAULT_EQ, "D", "UP_BREAKDOWN", "고장 신호 수신 (리허설 버튼)", ts(FAULT_ON), ts(FAULT_OFF), "리허설: 복구 버튼으로 재가동")],
+       [(FAULT_EQ, "D", "UP_BREAKDOWN", "고장 신호 수신 (리허설 버튼)", ts(FAULT_ON), ts(FAULT_OFF), "리허설: 복구 버튼으로 재가동")] if FAULT_EQ and FAULT_OFF <= END else [],
        f"8. 비가동 ({FAULT_OFF - FAULT_ON}초 → 1분 이상이라 비가동 1건)")
 L.append("-- 9. 알람: 넣지 않아요 (11/18: 백엔드 판정 로직이 공정 result와 알람을 만들어요)\n")
 insert("equipment_signal", ["equipment_id", "last_seen_at", "fault", "updated_at"],
@@ -291,7 +319,7 @@ WHERE h.equipment_id = d.equipment_id AND h.started_at = d.started_at AND h.stat
 
 COMMIT;
 """)
-open(f"{out}/rehearsal_{MIN}min_data.sql", "w", encoding="utf-8").write("\n".join(L))
+open(f"{out}/rehearsal_{SUFFIX}_data.sql", "w", encoding="utf-8").write("\n".join(L))
 
 # ---------------- 요약 ----------------
 def cnt(kind, cond=lambda r: True):

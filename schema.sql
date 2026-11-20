@@ -1,6 +1,6 @@
 -- =====================================================================
 -- 라인 가동 현황 모니터링 시스템 · DB 스키마 (PostgreSQL)
--- 1조 가동가동해 · 작성 2026-11-18 · v0.3.13 (11/20 계정 권한)
+-- 1조 가동가동해 · 작성 2026-11-18 · v0.3.14 (11/20 목표 변동 보고서 · 캠퍼스장)
 --
 -- 실행 방법:  psql -U postgres -d sfaas -f schema.sql
 -- 이 파일이 DB 구조의 "정답지"예요. 테이블을 바꿀 땐 이 파일을 고치고 GitHub에 올려요.
@@ -8,6 +8,11 @@
 --
 -- ★ 현재 처리 시간 (v0.3.9, seed.sql): 슬리팅 16 · 프레스 17 (1대당, 라인에 4대) · 용접 17 · 도장 4 · 비전 검사 2초 (11/18 7→2초)
 --   라인 박자 16초. 프레스(17초 > 박자 16초) 앞에 재공이 조금씩 쌓여요. 아래 버전별 기록의 처리 시간은 그때 값이에요.
+--
+-- v0.3.14 변경 (11/20, alter_v0.3.14.sql)
+--   · reassignment_report.downtime_id NULL 허용 (목표 변경 보고서 kind = 'target'은 고장 건 없음)
+--   · users.role에 CAMPUS_HEAD 캠퍼스장 (보기 전용)
+--   · 공장장 승인 시 라인 목표·도장 경로를 백엔드가 바꿈 (구조 변경 없음)
 --
 -- v0.3.13 변경 (11/20 계정 권한, alter_v0.3.13.sql)
 --   · users.role = PLANT_MANAGER 공장장 · PRODUCTION_MANAGER 생산관리팀장 · LINE_MANAGER 라인 담당자 (기본값 LINE_MANAGER)
@@ -143,7 +148,7 @@ CREATE TABLE users (
     login_id       VARCHAR(30)  NOT NULL UNIQUE,
     password_hash  VARCHAR(100) NOT NULL,           -- 비밀번호 원문 저장 금지! Spring Security BCrypt 결과를 저장
     user_name      VARCHAR(20)  NOT NULL,           -- 조치 담당자 이름은 여기서 가져와요
-    role           VARCHAR(20)  NOT NULL DEFAULT 'LINE_MANAGER',  -- v0.3.13: PLANT_MANAGER 공장장 · PRODUCTION_MANAGER 생산관리팀장 · LINE_MANAGER 라인 담당자
+    role           VARCHAR(20)  NOT NULL DEFAULT 'LINE_MANAGER',  -- v0.3.13: PLANT_MANAGER 공장장 · PRODUCTION_MANAGER 생산관리팀장 · LINE_MANAGER 라인 담당자 · (v0.3.14) CAMPUS_HEAD 캠퍼스장
     email          VARCHAR(100),
     memo           VARCHAR(200),
     last_login_at  TIMESTAMP,
@@ -397,7 +402,7 @@ CREATE INDEX idx_paint_route_line_time ON paint_route_history (line_id, changed_
 -- ※ 지금은 계획서 작성까지만. 재배정을 할 수도 있어서 승인 칸은 두고 비워 둠 (v0.3.4)
 CREATE TABLE reassignment_report (
     report_id     BIGSERIAL   PRIMARY KEY,
-    downtime_id   BIGINT      NOT NULL REFERENCES downtime_event(downtime_id),
+    downtime_id   BIGINT      REFERENCES downtime_event(downtime_id),  -- v0.3.14: 목표 변경 보고서(kind target)는 NULL
     loss_qty      INTEGER     NOT NULL,             -- 손실 수량 = 정지 시간 × 라인 시간당 생산 능력
     created_at    TIMESTAMP   NOT NULL DEFAULT now(),
     approved      BOOLEAN     NOT NULL DEFAULT FALSE,   -- 관리자 승인 여부 (지금은 안 씀)
@@ -405,7 +410,7 @@ CREATE TABLE reassignment_report (
     approved_at   TIMESTAMP,
     -- v0.3.10 계획수정 보고서 (R-03): 계산 기준과 AI 문장
     created_by    INTEGER     REFERENCES users(user_id),  -- 만든 사람
-    kind          VARCHAR(10),                      -- line 라인 전체 정지 / paint 도장 1대 → 다른 1대 / vision 대체 없음
+    kind          VARCHAR(10),                      -- line 라인 전체 정지 / paint 도장 1대 → 다른 1대 / vision 대체 없음 / target 생산 목표 변경 (v0.3.14)
     base_at       TIMESTAMP,                        -- 계산 기준 시각 (오늘 건 = 만든 시각, 지난 날 건 = 고장 시작)
     ct_sec        NUMERIC(6,2),                     -- 계산에 쓴 CT
     stopped_plan  INTEGER,                          -- 멈춘 쪽 그날 계획
