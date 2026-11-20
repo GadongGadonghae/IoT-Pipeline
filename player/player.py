@@ -90,6 +90,7 @@ def load_config(path):
     cfg["coil"].setdefault("enabled", True)
     cfg["coil"].setdefault("product_qty", 20)
     cfg["coil"].setdefault("schedule", [{"at_sec": 0, "rolls": 4}])
+    cfg.setdefault("hold_lines", [])   # 🆕 11/20 처음에 멈춰 둘 라인 (추가 주문으로 나중에 가동, --hold 와 같음)
     if cfg["value_naming"] not in ("snake", "camel"):
         sys.exit("[설정 오류] value_naming은 \"camel\" 또는 \"snake\"이어야 해요.")
     if float(cfg["heartbeat"]["interval_sec"]) <= 0:
@@ -306,6 +307,30 @@ class Sender:
         self.client.publish(self.ctl_topic, self._ctl_text(True), qos=1, retain=True)
         say(f"{CYN}재생 시작 알림: {self.ctl_topic} running=true{RST}")
 
+    def listen_line_commands(self, cmd_q):
+        """🆕 11/20 라인 가동 명령 받기: {ctl}/line 에 {"lineId":"D","action":"start"} 가 오면 키보드 명령 "start D"처럼 처리해요.
+        백엔드가 추가 주문 배정 보고서를 '승인하고 적용'하면 보내요 (R-05). hold 는 다시 멈추기"""
+        if self.dry or not self.client:
+            return
+        topic = f"{TOPICS['ctl']}/line"
+
+        def on_message(_client, _userdata, msg):
+            try:
+                body = json.loads(msg.payload.decode("utf-8"))
+                line = str(body.get("lineId", "")).upper()
+                action = str(body.get("action", "")).lower()
+            except Exception:
+                say(f"{YEL}라인 명령을 읽지 못했어요: {msg.payload[:80]!r}{RST}")
+                return
+            if line in LINES and action in ("start", "hold"):
+                cmd_q.put(f"{action} {line}")
+            else:
+                say(f"{YEL}모르는 라인 명령이에요: {body}{RST}")
+
+        self.client.on_message = on_message
+        self.client.subscribe(topic, qos=1)
+        say(f"{CYN}라인 가동 명령 받기: {topic} (예: {{\"lineId\":\"D\",\"action\":\"start\"}}){RST}")
+
     @staticmethod
     def _ctl_text(running):
         return json.dumps({"running": running, "ts": now_ts()})
@@ -341,6 +366,7 @@ def keyboard_thread(cmd_q):
 HELP = (f"{CYN}키보드 명령 (입력 후 Enter)\n"
         f"  f 설비ID → 고장 (예: f C-PR3) | r 설비ID → 복구\n"
         f"  c 설비ID → 통신 끊김 흉내 (예: c C-PR1) | u 설비ID → 통신 다시 연결\n"
+        f"  start 라인 → 멈춰 둔 라인 가동 (예: start D) | hold 라인 → 라인 멈추기 (값만 멈춤, 상태 신호는 계속)\n"
         f"  s → 현재 상태 | h → 도움말 | q → 종료{RST}")
 
 
@@ -352,6 +378,8 @@ def main():
     ap.add_argument("--speed", type=float, default=1.0, help="재생 속도 배율 (예: 2 → 2배 빠르게)")
     ap.add_argument("--manual", action="store_true", help="자동 고장 일정을 끄고 키보드로만 고장·복구")
     ap.add_argument("--quiet", action="store_true", help="--dry-run 때 메시지 한 줄씩 출력하지 않기")
+    ap.add_argument("--hold", nargs="*", default=None, metavar="라인",
+                    help="처음에 멈춰 둘 라인 (예: --hold D F). 'start D' 명령이나 백엔드 적용(MQTT {ctl}/line)으로 가동")
     args = ap.parse_args()
     if args.speed <= 0:
         sys.exit("[오류] --speed는 0보다 커야 해요.")
@@ -371,6 +399,16 @@ def main():
     pause_start = {}                       # 스트림 → 멈춘 시작 시각
     faulted = set()                        # 지금 고장 중인 설비
     disconnected = set()                   # 통신 끊김 흉내 중인 설비
+    # 🆕 11/20 멈춰 둔 라인: 그 라인의 슬리팅~검사 스트림을 0초부터 멈춰 두고, start 명령을 받은 때부터 처음 줄부터 보내요
+    held = [l.upper() for l in (args.hold if args.hold is not None else cfg["hold_lines"])]
+    bad = [l for l in held if l not in LINES]
+    if bad:
+        sys.exit(f"[오류] 없는 라인이에요: {', '.join(bad)} (A~F)")
+    for line in held:
+        for k in streams:
+            if k != "AUTO_FAULT" and k != "COIL" and key_line(k) == line:
+                pause_causes.setdefault(k, set()).add("HOLD:" + line)
+                pause_start.setdefault(k, 0.0)
     dropped = 0                            # 통신 끊김으로 안 보낸 메시지 수
 
     # 상태 신호를 보낼 설비 (끈 슬리팅은 PLC가 대신하므로 상태 신호도 안 보냄)
@@ -399,10 +437,13 @@ def main():
         say(f"{YEL}상태 신호: 꺼짐 → 고장·복구도 알릴 수 없어요{RST}")
     n_coil = sum(1 for e in events if e["kind"] == "coil")
     say(f"코일 입고: {n_coil}롤" if n_coil else f"{YEL}코일 입고: 꺼짐{RST}")
+    if held:
+        say(f"{YEL}멈춰 둔 라인: {', '.join(held)} → 상태 신호만 보내고 값은 'start 라인' 명령을 받을 때부터 보내요{RST}")
     say(HELP)
 
     cmd_q = queue.Queue()
     threading.Thread(target=keyboard_thread, args=(cmd_q,), daemon=True).start()
+    sender.listen_line_commands(cmd_q)
 
     t0 = time.perf_counter()
 
@@ -466,6 +507,34 @@ def main():
             return True
         if c == "s":
             status_line(now_offset())
+            return True
+        if c in ("start", "hold") and len(parts) == 2:
+            line = parts[1].upper().replace("라인", "")
+            if line not in LINES:
+                say(f"{YEL}알 수 없는 라인이에요: {parts[1]} (A~F){RST}")
+                return True
+            off = now_offset()
+            cause = "HOLD:" + line
+            keys = [k for k in streams if k not in ("AUTO_FAULT", "COIL") and key_line(k) == line]
+            if c == "start":
+                if not any(cause in pause_causes.get(k, ()) for k in keys):
+                    say(f"{YEL}{line}라인은 멈춰 있지 않아요.{RST}")
+                    return True
+                for k in keys:
+                    if cause not in pause_causes.get(k, ()):
+                        continue
+                    pause_causes[k].discard(cause)
+                    if not pause_causes[k]:
+                        shift[k] += off - pause_start.pop(k)
+                        del pause_causes[k]
+                say(f"{GRN}[{off:6.1f}s] ▶ {line}라인 가동 → 처음 제품부터 값을 보내요 (추가 주문 적용){RST}")
+            else:
+                for k in keys:
+                    if not pause_causes.get(k):
+                        pause_causes[k] = set()
+                        pause_start[k] = off
+                    pause_causes[k].add(cause)
+                say(f"{YEL}[{off:6.1f}s] ■ {line}라인 멈춤 → 값 전송을 멈춰요 (상태 신호는 계속){RST}")
             return True
         if c not in ("f", "r", "c", "u") or len(parts) != 2:
             say(f"{YEL}명령을 모르겠어요: '{line}'{RST}")
@@ -535,8 +604,11 @@ def main():
             for k, dq in streams.items():
                 if not dq:
                     continue
+                causes = pause_causes.get(k)
+                if causes and off >= duration and all(c.startswith("HOLD:") for c in causes):
+                    continue  # 끝까지 가동하지 않은 라인은 기다리지 않아요
                 left = True
-                if pause_causes.get(k):
+                if causes:
                     continue
                 t = dq[0]["t"] + shift[k]
                 if best_t is None or t < best_t:
