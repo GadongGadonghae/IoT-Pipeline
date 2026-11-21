@@ -47,8 +47,9 @@ VALUE_COLS = {
 }
 # 🆕 11/21 슬리팅 더미 값 (slitting.values = "dummy"): 항목 → [가운데 값, 흔들림 폭]. ⚠️ 가짜 시연 값 (실측 아님)
 #   같은 제품 번호면 늘 같은 값 (다시 재생해도 같은 그래프). 설비마다 가운데 값이 조금씩 달라요
-# 11/21 실측(LS SV-iG5A, 11/20 밤 A-SL) 근처로: 가동 중 전압 약 185 V · 전류 약 0.1 A, 토크는 인버터가 안 줘서 0
-SLITTING_DUMMY = {"torque": [0.0, 0.0], "current": [0.1, 0.02], "voltage": [185.0, 3.0]}
+# 11/21 실측(LS SV-iG5A, 11/20 밤 A-SL) 근처로: 가동 중 전압 약 185 V · 전류 약 0.1 A
+#   토크는 이 인버터가 주지 않는 값이라 보내지 않아요 (0을 보내면 "토크 0"으로 잘못 읽혀요 → DB는 빈 값, 화면은 "측정 안 함")
+SLITTING_DUMMY = {"current": [0.1, 0.02], "voltage": [185.0, 3.0]}
 LINES = list("ABCDEF")
 LINE_STAGES = ["SL", "PR1", "PR2", "PR3", "PR4", "WD"]   # 라인 안 공정 순서
 # 설비 39대 (라인 A~F × 슬리팅·프레스 4·용접) + 도장 2 + 검사 1
@@ -476,6 +477,10 @@ def main():
     gates = {}                             # 뒤 공정 스트림 → 막고 있는 고장 설비들
     gate_start = {}                        # 뒤 공정 스트림 → 다음 제품을 기다리기 시작한 재생 시각
     passed = {}                            # 설비 → 그 설비 처리를 끝낸(end 보낸) 제품 번호들
+    # 🆕 11/21 도장 경로 (라인 → 지금 도장). 경로 전환 명령을 받으면 그 라인의 다음 도장 제품부터 새 도장으로 보내요
+    #   CSV는 기본 경로(A·B·C → PT1, D·E·F → PT2)로 만들어져 있어서, 보낼 때 설비 ID만 바꿔요 (도장 CT는 두 대가 같아요)
+    route_now = {l: ("PT1" if l in "ABC" else "PT2") for l in LINES}
+    painted_by = {}                        # 제품 번호 → 실제로 칠한 도장 (검사 메시지 paintId · 검사 앞 공정 판단)
     disconnected = set()                   # 통신 끊김 흉내 중인 설비
     # 🆕 11/20 멈춰 둔 라인: 그 라인의 슬리팅~검사 스트림을 0초부터 멈춰 두고, start 명령을 받은 때부터 처음 줄부터 보내요
     held = [l.upper() for l in (args.hold if args.hold is not None else cfg["hold_lines"])]
@@ -597,7 +602,8 @@ def main():
     def prev_stage(k, e):
         """스트림의 바로 앞 공정 설비 (C-PR4 → C-PR3, C-WD → C-PR4, PT1:C → C-WD, VI:C → 그 제품의 도장 설비)"""
         if k.startswith("VI:"):
-            return e["data"].get("paint_id") or ""
+            pid = e["data"].get("product_id")
+            return painted_by.get(pid) or e["data"].get("paint_id") or ""
         if ":" in k:   # 도장
             return f"{key_line(k)}-WD"
         i = LINE_STAGES.index(k.split("-")[1])
@@ -608,8 +614,10 @@ def main():
         if eq == "VI":
             return [k for k in streams if k.startswith("VI:")]
         if eq.startswith("PT"):
-            lines = {key_line(k) for k in streams if k.startswith(eq + ":")}
-            return [k for k in streams if k.startswith(eq + ":") or (k.startswith("VI:") and key_line(k) in lines)]
+            # 🆕 11/21 지금 경로로 이 도장을 쓰는 라인 (경로를 바꿨으면 CSV 설비 ID가 아니라 지금 경로 기준)
+            lines = {L for L in LINES if route_now.get(L) == eq}
+            return [k for k in streams if (k.startswith("PT") and ":" in k and key_line(k) in lines)
+                    or (k.startswith("VI:") and key_line(k) in lines)]
         line, stage = eq[0], key_stage(eq)
         # 11/21: 코일 입고 줄(COIL)은 설비가 아니라서 빼요 (key_line("COIL") = "C"로 C라인 고장 때 멈추던 버그)
         return [k for k in streams if k not in ("AUTO_FAULT", "COIL") and key_line(k) == line and key_stage(k) >= stage]
@@ -642,12 +650,39 @@ def main():
             return True
         if c == "route" and len(parts) >= 2:
             line = parts[1].upper().replace("라인", "")
+            if line not in LINES:
+                say(f"{YEL}없는 라인이에요: {line} (A~F){RST}")
+                return True
+            new_pt = parts[2].upper() if len(parts) > 2 else None
+            off = now_offset()
+            # 🆕 11/21 경로 바꾸기: 다음 도장 제품부터 새 도장으로. 옛 도장 고장 때문에 멈춰 있던 이 라인 도장·검사 줄은 풀어요
+            if new_pt in ("PT1", "PT2"):
+                old = route_now.get(line)
+                route_now[line] = new_pt
+                for k in streams:
+                    if key_line(k) != line or not (k.startswith("PT") and ":" in k or k.startswith("VI:")):
+                        continue
+                    if gates.get(k):
+                        gates[k] = {g for g in gates[k] if not g.startswith("PT")}
+                        if not gates[k]:
+                            del gates[k]
+                            if k in gate_start:
+                                shift[k] += max(0.0, off - gate_start.pop(k))
+                    cs = pause_causes.get(k)
+                    if cs and any(x.startswith("PT") for x in cs):
+                        for x in [x for x in cs if x.startswith("PT")]:
+                            cs.discard(x)
+                        if not cs:
+                            shift[k] += off - pause_start.pop(k)
+                            del pause_causes[k]
+                if old != new_pt:
+                    say(f"{GRN}[{off:6.1f}s] ⇄ {line}라인 도장 경로 {old} → {new_pt} (다음 도장 제품부터){RST}")
             cause = "ROUTE:" + line
             keys = [k for k in streams if cause in pause_causes.get(k, ())]
             if not keys:
-                say(f"{YEL}{line}라인은 도장 경로 전환을 기다리고 있지 않아요.{RST}")
+                if not new_pt:
+                    say(f"{YEL}{line}라인은 도장 경로 전환을 기다리고 있지 않아요. (바꾸려면 route {line} PT2){RST}")
                 return True
-            off = now_offset()
             for k in keys:
                 pause_causes[k].discard(cause)
                 if not pause_causes[k]:
@@ -711,7 +746,7 @@ def main():
                 return True
             set_fault(eq, 1, how)
             for k in affected_streams(eq):
-                own = k == eq or k.startswith(eq + ":") or eq == "VI"
+                own = k == eq or (k.startswith("PT") and ":" in k and route_now.get(key_line(k)) == eq) or eq == "VI"
                 if own:   # 고장 설비 자신: 안에 든 제품도 복구 때까지 그대로
                     if not pause_causes.get(k):
                         pause_causes[k] = set()
@@ -808,6 +843,17 @@ def main():
                 next_hb += max(hb_interval, clock["speed"])   # 상태 신호는 실제 1초마다 (배속이 커도 메시지가 쏟아지지 않게)
                 continue
             e = streams[best_k].popleft()
+            # 🆕 11/21 도장 경로: 도장 값은 지금 경로의 도장 ID로, 검사 결과의 paintId는 실제로 칠한 도장으로
+            if e["kind"] == "painting":
+                L = e["data"].get("line_id") or key_line(best_k)
+                if route_now.get(L) and route_now[L] != e["eq"]:
+                    e = dict(e, eq=route_now[L])
+                if not e["data"].get("start") and e["data"].get("product_id"):
+                    painted_by[e["data"]["product_id"]] = e["eq"]
+            elif e["kind"] == "inspection":
+                pt = painted_by.get(e["data"].get("product_id"))
+                if pt and pt != e["data"].get("paint_id"):
+                    e = dict(e, data=dict(e["data"], paint_id=pt))
             if e["kind"] == "fault":
                 if e["data"].get("pause"):
                     # 🆕 11/21 "pause": true 고장 → 키보드 f/r과 같이 그 설비와 뒤 공정의 값 전송을 멈췄다가 복구 때 이어서 보내요

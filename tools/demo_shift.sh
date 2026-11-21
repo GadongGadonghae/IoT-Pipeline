@@ -24,6 +24,8 @@ sql() { "$PSQL" $DB -q -v ON_ERROR_STOP=1 -At -c "$1"; }
 case "$1" in
   prep)
     cd "$HERE"
+    # 가상 시계가 켜진 채 서버만 돌면 내일 이후 시각 상태 기록이 생겨, 오늘 비가동을 지울 때 외래키에 걸려요 (11/21) → 먼저 지움
+    sql "UPDATE sim_clock SET active = FALSE WHERE id = 1; DELETE FROM equipment_status_history WHERE started_at >= CURRENT_DATE + 1"
     PYTHONIOENCODING=utf-8 "$PY" make_history.py --shift 09:00-18:00 --prep-until "$FROM" --target 1000 | tail -1
     "$PSQL" $DB -q -v ON_ERROR_STOP=1 -f "$HERE/../history/history_$(date +%Y%m%d).sql" > /dev/null
     sql "INSERT INTO sim_clock (id, virtual_at, real_at, speed, active) VALUES (1, CURRENT_DATE + TIME '$FROM', LOCALTIMESTAMP, 1, FALSE)

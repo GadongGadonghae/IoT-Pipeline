@@ -51,6 +51,7 @@ INSERT INTO downtime_code (code, code_name, is_planned, description) VALUES
     ('PL_PM',        '예방보전',          TRUE,  '정기 점검'),
     ('PL_CHANGE',    '모델교체',          TRUE,  '금형 교체'),
     ('PL_SETUP',     '셋업',              TRUE,  '슬리팅 코일·나이프 교체'),
+    ('PL_STANDBY',   '물량 적음 운휴',    TRUE,  '가동 라인이 적어 공용 설비(도장)를 쉬게 함 (11/21 도장 운영 판단)'),
     ('UP_BREAKDOWN', '장비고장',          FALSE, '설비 고장 신호'),
     ('UP_ALARM',     '알람(관리값 이탈)', FALSE, '관리값 상·하한 초과 (SCR-009 기준)'),
     ('UP_SHORTAGE',  '재공부족',          FALSE, '앞 공정 정지로 재료 없음'),

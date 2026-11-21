@@ -140,13 +140,15 @@ p_bad = {it: p.loc[~p[it].between(*TH["press"][it]) & p[it].notna(), it].to_nump
 w_ok, w_bad = split(w, TH["weld"])
 c_ok, c_bad = split(c, TH["paint"])
 
-# 🆕 11/21 슬리팅 측정값 더미 (재생기 slitting.values = "dummy"와 같은 범위). ⚠️ 가짜 시연 값
+# 🆕 11/21 슬리팅 측정값 더미 (재생기 player.py SLITTING_DUMMY와 같은 범위 = 교육장 인버터 실측 근처). ⚠️ 가짜 시연 값
+#   토크는 인버터(LS SV-iG5A)가 주지 않아 빈 값(None) → 화면 "측정 안 함". 관리 기준: 전류 0.04~0.16 A · 전압 170~200 V
 import zlib
-SL_DUMMY = {"torque": (12.0, 0.6), "current": (3.5, 0.2), "voltage": (220.0, 2.5)}
+SL_DUMMY = {"current": (0.1, 0.02), "voltage": (185.0, 3.0)}
 def sl_vals(eq, pid):
+    """[토크, 전류, 전압] (토크는 None)"""
     rnd = random.Random(zlib.crc32(f"{eq}|{pid}".encode()))
     shift = ("ABCDEF".index(eq[0]) - 2.5) / 2.5
-    return [round(max(c0 - s0 * 2, min(c0 + s0 * 2, c0 + shift * s0 * 0.5 + rnd.gauss(0, s0 / 2))), 2) for c0, s0 in SL_DUMMY.values()]
+    return [None] + [round(max(c0 - s0 * 2, min(c0 + s0 * 2, c0 + shift * s0 * 0.5 + rnd.gauss(0, s0 / 2))), 2) for c0, s0 in SL_DUMMY.values()]
 
 def pick(df, cols):
     r = df.iloc[random.randrange(len(df))]
@@ -426,6 +428,10 @@ DELETE FROM target_change WHERE target_date >= '{base_s}';
 DELETE FROM reassignment_report WHERE created_at >= '{base_s}';
 UPDATE line SET current_paint_id = default_paint_id WHERE current_paint_id IS DISTINCT FROM default_paint_id;
 TRUNCATE equipment_signal;
+-- 11/21 도장 운영 판단: 운휴 계획정지 코드 (없는 DB에도 넣어 둠) · 도장 운휴는 처음부터 다시
+INSERT INTO downtime_code (code, code_name, is_planned, description) VALUES ('PL_STANDBY', '물량 적음 운휴', TRUE, '가동 라인이 적어 공용 설비(도장)를 쉬게 함') ON CONFLICT (code) DO NOTHING;
+DELETE FROM equipment_status_history h USING downtime_event d WHERE h.downtime_id = d.downtime_id AND d.code = 'PL_STANDBY';
+DELETE FROM downtime_event WHERE code = 'PL_STANDBY';
 """)
 
 summary = []
