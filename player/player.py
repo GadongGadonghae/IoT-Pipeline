@@ -482,6 +482,15 @@ def main():
     route_now = {l: ("PT1" if l in "ABC" else "PT2") for l in LINES}
     painted_by = {}                        # 제품 번호 → 실제로 칠한 도장 (검사 메시지 paintId · 검사 앞 공정 판단)
     disconnected = set()                   # 통신 끊김 흉내 중인 설비
+    # 🆕 11/22 프레스 고장 때 앞 프레스 막힘: 단 사이에 쌓을 자리가 없어서, 끝낸 제품을 다음 단이 받아 가야 새 제품을 시작할 수 있어요
+    block_lines = set()                    # 프레스 고장이 난 라인 (그 뒤로 계속 검사. 평소 흐름에서는 걸릴 일이 없어요)
+    started_at_eq = {}                     # 설비 → 들어간 제품 번호들
+    last_end = {}                          # 설비 → 마지막으로 끝낸 제품 번호
+    blocked = {}                           # 지금 막혀 있는 스트림 → 화면에 알렸는지
+    goes_to = {}                           # 설비 → 그 설비로 가는 제품 번호들 (공정 불량으로 빠진 제품은 다음 단이 받지 않음)
+    for _k, _dq in streams.items():
+        if "-PR" in _k:
+            goes_to[_k] = {x["data"].get("product_id") for x in _dq if x["data"].get("start")}
     # 🆕 11/20 멈춰 둔 라인: 그 라인의 슬리팅~검사 스트림을 0초부터 멈춰 두고, start 명령을 받은 때부터 처음 줄부터 보내요
     held = [l.upper() for l in (args.hold if args.hold is not None else cfg["hold_lines"])]
     bad = [l for l in held if l not in LINES]
@@ -608,6 +617,18 @@ def main():
             return f"{key_line(k)}-WD"
         i = LINE_STAGES.index(k.split("-")[1])
         return f"{k[0]}-{LINE_STAGES[i - 1]}" if i > 0 else ""
+
+    def press_blocked(k, e):
+        """앞 프레스 막힘: PRn이 끝낸 제품을 PR(n+1)이 아직 안 받았으면 PRn은 다음 제품을 시작하지 못해요 (슬리팅 뒤는 쌓을 자리가 있어서 계속)"""
+        if k[0] not in block_lines or "-PR" not in k or not e["data"].get("start"):
+            return False
+        i = LINE_STAGES.index(k.split("-")[1])
+        nxt = LINE_STAGES[i + 1]
+        if not nxt.startswith("PR"):
+            return False                   # PR4 뒤(용접 앞)는 쌓을 자리가 있어요
+        nk = f"{k[0]}-{nxt}"
+        pid = last_end.get(k)
+        return bool(pid) and pid in goes_to.get(nk, ()) and pid not in started_at_eq.get(nk, ())
 
     def affected_streams(eq):
         """수동 고장 때 멈출 스트림: 그 설비 + 뒤 공정 (앞 공정은 계속)"""
@@ -754,7 +775,10 @@ def main():
                     pause_causes[k].add(eq)
                 else:     # 뒤 공정: 이미 지나간 제품은 끝까지, 그다음 제품부터 기다림 → 자기 일 끝나면 대기(I)
                     gates.setdefault(k, set()).add(eq)
-            say(f"{YEL}  → {eq} 멈춤. 뒤 공정은 하던 제품을 끝내고 다음 제품을 기다려요 (앞 공정은 계속).{RST}")
+            if "-PR" in eq:
+                block_lines.add(eq[0])
+            say(f"{YEL}  → {eq} 멈춤. 뒤 공정은 하던 제품을 끝내고 다음 제품을 기다려요. "
+                f"{'앞 프레스는 하던 제품을 끝내고 막히고, 슬리팅은 계속해서 앞에 재공이 쌓여요' if '-PR' in eq else '앞 공정은 계속'}.{RST}")
         else:  # r
             if eq not in faulted:
                 say(f"{YEL}{eq}는 고장 상태가 아니에요.{RST}")
@@ -823,6 +847,17 @@ def main():
                 if causes and not (route_hold and all(c.startswith("ROUTE:") for c in causes)
                                    and dq[0]["t"] + shift[k] < float(route_hold["at"])):
                     continue
+                # 🆕 11/22 앞 프레스 막힘: 다음 단이 받아 갈 때까지 새 제품을 시작하지 않아요. 풀리면 기다린 만큼 뒤를 밀어요
+                if press_blocked(k, dq[0]):
+                    late = off - (dq[0]["t"] + shift[k])
+                    if late >= 0 and not blocked.get(k):
+                        blocked[k] = late > 10   # 받아 가는 순간의 짧은 기다림은 알리지 않아요
+                        if blocked[k]:
+                            say(f"{YEL}[{off:6.1f}s] ■ {k} 막힘 → 다음 프레스가 받아 갈 때까지 대기{RST}")
+                    continue
+                if k in blocked:
+                    del blocked[k]
+                    shift[k] += max(0.0, off - (dq[0]["t"] + shift[k]))
                 t = dq[0]["t"] + shift[k]
                 if best_t is None or t < best_t:
                     best_k, best_t = k, t
@@ -875,8 +910,12 @@ def main():
                 continue
             topic, text = sender.send(build_message(e))
             counts["start" if e["data"].get("start") else e["kind"]] += 1
-            if not e["data"].get("start") and e["data"].get("product_id"):
-                passed.setdefault(e["eq"], set()).add(e["data"]["product_id"])   # 고장 뒤 공정 기다림 판단용
+            if e["data"].get("product_id"):
+                if e["data"].get("start"):
+                    started_at_eq.setdefault(e["eq"], set()).add(e["data"]["product_id"])   # 앞 프레스 막힘 판단용
+                else:
+                    passed.setdefault(e["eq"], set()).add(e["data"]["product_id"])   # 고장 뒤 공정 기다림 판단용
+                    last_end[e["eq"]] = e["data"]["product_id"]
             if e["star"]:
                 say(f"{RED}[{off:6.1f}s] ★ 불량 줄 {e['eq']}  {topic} {text}\n"
                     f"           ({e['note']}){RST}")
